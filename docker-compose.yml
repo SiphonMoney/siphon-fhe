@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # 1. Python Trade Executor (The Manager)
+  trade-executor:
+    build: ./syphon-executor  # Path to your Python project
+    container_name: syphon-trade-executor
+    ports:
+      - "5005:5005"
+    environment:
+      # Connect to the FHE Engine service defined below
+      - FHE_ENGINE_BRACKET_URL=http://fhe-engine:5001/evaluate_bracket_order
+      - FHE_ENGINE_LIMIT_BUY_URL=http://fhe-engine:5001/evaluate_limit_buy
+      - FHE_ENGINE_LIMIT_SELL_URL=http://fhe-engine:5001/evaluate_limit_sell
+      
+      # External Services
+      - PYTH_HERMES_URL=https://hermes.pyth.network
+
+      # Local Blockchain (Use host.docker.internal to reach Anvil on your machine)
+      - SEPOLIA_RPC_URL=http://host.docker.internal:8545
+      
+      # Database
+      - DATABASE_URI=sqlite:///strategies.db?timeout=30
+
+      # Secrets (These will be pulled from your local .env file)
+      - SYPHON_VAULT_CONTRACT_ADDRESS=${SYPHON_VAULT_CONTRACT_ADDRESS}
+      - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Allows access to localhost services like Anvil
+    depends_on:
+      - fhe-engine
+    restart: unless-stopped
+
+  # 2. Rust FHE Engine (The Calculator)
+  fhe-engine:
+    build: ./fhe  # Path to your Rust FHE project
+    container_name: syphon-fhe-engine
+    ports:
+      - "5001:5001"
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
