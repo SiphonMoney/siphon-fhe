@@ -6,11 +6,13 @@ from trade_executor import execute_trade
 from config import CHECK_INTERVAL_SECONDS, PYTH_PRICE_FEED_IDS
 
 def worker_loop(app):
-    print("[Scheduler] Starting worker loop..")
+    print("[Scheduler] Starting worker loop")
+    
     while True:
         try:
             with app.app_context():
                 pending_strategies = Strategy.query.filter_by(status='PENDING').all()
+                
                 if not pending_strategies:
                     time.sleep(CHECK_INTERVAL_SECONDS)
                     continue
@@ -30,16 +32,26 @@ def worker_loop(app):
                     continue
 
                 current_eth_price = live_prices[eth_feed_id]
-                print(f"[Scheduler] Current ETH price: ${current_eth_price:,.2f}")
+                print(f"[Scheduler] Processing {len(strategies_to_process)} strategies. Current ETH price: ${current_eth_price:,.2f}")
 
                 for strategy_dict in strategies_to_process:
-                    if is_condition_met(strategy_dict, current_eth_price):
-                        execute_trade(strategy_dict, current_eth_price)
-                        strategy_to_update = Strategy.query.get(strategy_dict['id'])
-                        if strategy_to_update:
-                            strategy_to_update.status = 'EXECUTED'
-                            db.session.commit()
+                    try:
+                        if is_condition_met(strategy_dict, current_eth_price):
+                            print(f"[Scheduler] Condition met for Strategy ID {strategy_dict.get('id')}. Executing...")
+                            
+                            execute_trade(strategy_dict, current_eth_price)
+                            
+                            strategy_to_update = Strategy.query.get(strategy_dict['id'])
+                            if strategy_to_update:
+                                strategy_to_update.status = 'EXECUTED'
+                                db.session.commit()
+                                print(f"[Scheduler] Strategy {strategy_dict.get('id')} marked as EXECUTED.")
+                                
+                    except Exception as strategy_err:
+                        print(f"[Scheduler] Error processing individual strategy {strategy_dict.get('id')}: {strategy_err}")
+                        continue
 
         except Exception as e:
-            print(f"[Scheduler] An error occurred: {e}")
+            print(f"[Scheduler] Global loop error: {e}")
+            
         time.sleep(CHECK_INTERVAL_SECONDS)

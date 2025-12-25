@@ -40,7 +40,7 @@ pub async fn evaluate_strategy(
     
     // 2. Perform the real homomorphic computation based on the strategy type.
     let encrypted_result = match payload.strategy_type.as_str() {
-        "BRACKET_ORDER_LONG" | "BRACKET_ORDER_SHORT" => {
+        "LIMIT_ORDER" | "BRACKET_ORDER_SHORT" => {
             let enc_upper: RadixCiphertext = bincode::deserialize(&hex::decode(payload.encrypted_upper_bound).unwrap()).unwrap();
             let enc_lower: RadixCiphertext = bincode::deserialize(&hex::decode(payload.encrypted_lower_bound).unwrap()).unwrap();
             

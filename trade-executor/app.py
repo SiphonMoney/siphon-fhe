@@ -6,7 +6,7 @@ import json
 from database import db, Strategy
 from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
-from verifier import verify_strategy_offchain
+
 
 app = Flask(__name__)
 CORS(app)
@@ -15,9 +15,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-# This check ensures the scheduler starts in Gunicorn and not twice in Flask debug mode.
 if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-    
     print("--- Starting the background scheduler thread ---")
     scheduler_thread = threading.Thread(target=worker_loop, args=(app,), daemon=True)
     scheduler_thread.start()
@@ -25,11 +23,10 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
 @app.route('/createStrategy', methods=['POST'])
 def create_strategy():
     data = request.json
-    if not data: return jsonify({"error": "Invalid JSON"}), 400
+    if not data: 
+        return jsonify({"error": "Invalid JSON"}), 400
 
-    if not verify_strategy_offchain(data):
-        return jsonify({"status": "error", "message": "Strategy failed initial ZKP check."}), 400
-    
+
     try:
         strategy_type = data.get("strategy_type", "")
         token_symbol = data.get('asset_in') if "LONG" in strategy_type or "SELL" in strategy_type else data.get('asset_out')
@@ -45,11 +42,17 @@ def create_strategy():
             encrypted_lower_bound=json.dumps(data.get('encrypted_lower_bound')),
             server_key=json.dumps(data.get('server_key')),
             encrypted_client_key=json.dumps(data.get('encrypted_client_key')),
-            zkp_data=data['zkp_data']
+            zkp_data=data.get('zkp_data') or data.get('zk_proof')
         )
+        
         db.session.add(new_strategy)
         db.session.commit()
         return jsonify({"status": "success", "strategy_id": new_strategy.id}), 201
+
     except Exception as e:
+        print(f"Error creating strategy: {e}") 
         db.session.rollback()
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+
+if __name__ == '__main__':
+    app.run(port=5003, debug=True)

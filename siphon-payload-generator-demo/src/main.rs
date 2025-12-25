@@ -1,11 +1,11 @@
-mod fhe_core; // Ensure src/fhe_core.rs exists
+mod fhe_core; 
 
 use axum::{http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use bincode;
 use hex::encode;
 use reqwest;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value}; // Using Value for flexible JSON handling
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -19,6 +19,8 @@ struct StrategyInput {
     amount: f64,
     upper_bound: f64,
     lower_bound: f64,
+    recipient_address: String,
+    zk_proof: Value, // 👈 Capture real ZK object
 }
 
 #[derive(Serialize)]
@@ -28,6 +30,7 @@ struct StrategyPayload {
     asset_in: String,
     asset_out: String,
     amount: f64,
+    recipient_address: String,
     zkp_data: String,
     encrypted_upper_bound: String,
     encrypted_lower_bound: String,
@@ -38,13 +41,11 @@ struct StrategyPayload {
 
 #[tokio::main]
 async fn main() {
-    // 1️⃣ Configure CORS
     let cors = CorsLayer::new()
-        .allow_origin(Any) // Accept requests from any origin
+        .allow_origin(Any)
         .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
         .allow_headers(Any);
 
-    // 2️⃣ Build router
     let app = Router::new()
         .route("/generatePayload", post(handle_generate_payload))
         .layer(cors);
@@ -59,10 +60,7 @@ async fn main() {
 }
 
 async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoResponse {
-    println!(
-        "🧠 Generating encrypted payload for user: {}",
-        input.user_id
-    );
+    println!("🧠 Processing real ZK payload for user: {}", input.user_id);
 
     // 1️⃣ Generate FHE keys
     let (client_key, server_key) = fhe_core::generate_fhe_keys();
@@ -71,11 +69,30 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     let encrypted_upper = fhe_core::encrypt_price((input.upper_bound * 100.0) as u32, &client_key);
     let encrypted_lower = fhe_core::encrypt_price((input.lower_bound * 100.0) as u32, &client_key);
 
-    // 3️⃣ Mock ZKP data
-    let proof_array: Vec<u8> = vec![0; 24];
+    // 3️⃣ MAP ZK DATA
+    // We extract fields from the frontend JSON and map them to Python Executor format
+    
+    let default_val = json!("");
+    
+    // Frontend keys: "proof", "nullifierHash", "newCommitment", "atomicAmount"
+    let proof = input.zk_proof.get("proof").unwrap_or(&default_val);
+    let nullifier = input.zk_proof.get("nullifierHash").unwrap_or(&default_val);
+    let new_commitment = input.zk_proof.get("newCommitment").unwrap_or(&default_val);
+    
+    // Use atomicAmount if present (precision), otherwise fallback to calculation
+    let amount_val = input.zk_proof.get("atomicAmount")
+        .cloned()
+        .unwrap_or_else(|| json!((input.amount * 1_000_000.0) as u64));
+
+    // Construct JSON for Python: requires "publicInputs" with "asset"
     let zkp_data_string = serde_json::to_string(&json!({
-        "proof": proof_array,
-        "publicSignals": [12345, 67890, 0, 0]
+        "proof": proof,
+        "publicInputs": {
+            "nullifier": nullifier,
+            "newCommitment": new_commitment,
+            "asset": input.asset_in, // Passing symbol (e.g. "USDC"); Python handles lookup
+            "amount": amount_val
+        }
     }))
     .unwrap();
 
@@ -86,6 +103,7 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
         asset_in: input.asset_in.clone(),
         asset_out: input.asset_out.clone(),
         amount: input.amount,
+        recipient_address: input.recipient_address.clone(),
         zkp_data: zkp_data_string,
         encrypted_upper_bound: encode(bincode::serialize(&encrypted_upper).unwrap()),
         encrypted_lower_bound: encode(bincode::serialize(&encrypted_lower).unwrap()),
@@ -95,46 +113,25 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     };
 
     // 5️⃣ Send to Python orchestrator
-    let orchestrator_url = "http://localhost:5000/createStrategy";
+    // Ensure this matches your Flask app port
+    let orchestrator_url = "http://localhost:5005/createStrategy"; 
     let client = reqwest::Client::new();
 
     match client.post(orchestrator_url).json(&payload).send().await {
         Ok(res) => {
             let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-
             if status.is_success() {
-                println!("✅ Forwarded to Python orchestrator");
-                (
-                    StatusCode::OK,
-                    Json(json!({
-                        "status": "success",
-                        "message": "Payload forwarded to orchestrator",
-                        "payload": payload
-                    })),
-                )
+                println!("✅ Forwarded real ZK data to Python orchestrator");
+                (StatusCode::OK, Json(json!({"status": "success", "payload": payload})))
             } else {
-                eprintln!("❌ Orchestrator error ({}): {}", status, text);
-                (
-                    status,
-                    Json(json!({
-                        "status": "error",
-                        "message": format!("Orchestrator responded with error: {}", text)
-                    })),
-                )
+                let text = res.text().await.unwrap_or_default();
+                eprintln!("❌ Orchestrator error: {}", text);
+                (status, Json(json!({"status": "error", "message": text})))
             }
         }
-
         Err(e) => {
             eprintln!("❌ Failed to reach orchestrator: {}", e);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "status": "error",
-                    "message": "Failed to reach orchestrator",
-                    "details": e.to_string()
-                })),
-            )
+            (StatusCode::BAD_GATEWAY, Json(json!({"status": "error", "details": e.to_string()})))
         }
     }
 }

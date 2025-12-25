@@ -7,7 +7,6 @@ from config import (
     EXECUTOR_PRIVATE_KEY
 )
 
-# --- MOCK TOKEN ADDRESSES (for local Anvil testing) ---
 TOKEN_ADDRESSES = {
     "ETH": Web3.to_checksum_address("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"), 
     "USDC": Web3.to_checksum_address("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"), 
@@ -21,63 +20,91 @@ except FileNotFoundError:
     print("CRITICAL ERROR: SyphonVault.abi.json not found.")
     CONTRACT_ABI = None
 
+def encode_proof_to_bytes(proof_list):
+    """
+    Converts a list of 24 strings/ints into a single 32-byte-aligned bytes object.
+    Handles Decimal strings (standard SnarkJS) and Hex strings.
+    """
+    if not isinstance(proof_list, list):
+        return b''
+    
+    encoded = b''
+    for item in proof_list:
+        try:
+            val = 0
+            if isinstance(item, int):
+                val = item
+            elif isinstance(item, str):
+                if item.startswith("0x"):
+                    val = int(item, 16)
+                else:
+                    val = int(item, 10) 
+            
+            encoded += val.to_bytes(32, 'big')
+        except Exception as e:
+            print(f"   [Encode Error] Failed to process proof item '{item}': {e}")
+            raise e
+            
+    return encoded
+
 def execute_trade(strategy, current_price):
-    """
-    Connects to the blockchain, builds, signs, and sends the final
-    'swap' transaction to the Entrypoint contract.
-    """
     print("\n" + "="*60)
     print(f"✅ EXECUTION: Trigger met for strategy '{strategy['id']}'")
-    print(f"   User: {strategy['user_id']}")
-    print(f"   Recipient: {strategy['recipient_address']}") # Added log
     print(f"   Strategy Type: {strategy['strategy_type']}")
     print(f"   Current Price: ${current_price:,.2f}")
-    print(f"\n   Preparing ON-CHAIN execution...")
-
+    
     if not all([SEPOLIA_RPC_URL, SYPHON_VAULT_CONTRACT_ADDRESS, CONTRACT_ABI, EXECUTOR_PRIVATE_KEY]):
         print("   ❌ [Executor] CRITICAL ERROR: Missing .env config.")
         return
 
     try:
-        # 1. Connect to the blockchain
         w3 = Web3(Web3.HTTPProvider(SEPOLIA_RPC_URL))
         executor_account = w3.eth.account.from_key(EXECUTOR_PRIVATE_KEY)
         w3.eth.default_account = executor_account.address
         print(f"   [Executor] Wallet loaded: {executor_account.address}")
 
-        # 2. Load the Entrypoint/Vault contract
         vault_contract = w3.eth.contract(
             address=SYPHON_VAULT_CONTRACT_ADDRESS, 
             abi=CONTRACT_ABI
         )
 
-        # 3. Parse the ZKP data
         try:
             zk_payload = json.loads(strategy['zkp_data'])
-            _proof_bytes = zk_payload['proof'] 
-            _nullifier = int(zk_payload['publicInputs']['nullifier'])
-            _newCommitment = int(zk_payload['publicInputs']['newCommitment'])
-            _asset_in_address = Web3.to_checksum_address(zk_payload['publicInputs']['asset'])
-            _amountIn = int(zk_payload['publicInputs']['amount'])
+            inputs = zk_payload.get('publicInputs', {})
+            
+            raw_proof_list = zk_payload.get('proof', [])
+            _proof_bytes = encode_proof_to_bytes(raw_proof_list)
+
+            _nullifier = int(inputs.get('nullifier', 0))
+            _newCommitment = int(inputs.get('newCommitment', 0))
+            _amountIn = int(inputs.get('amount', 0))
+            
+            raw_asset = inputs.get('asset', '')
+            print(f"   [Executor] Processing Asset: '{raw_asset}'")
+
+            if raw_asset in TOKEN_ADDRESSES:
+                _asset_in_address = TOKEN_ADDRESSES[raw_asset]
+            elif w3.is_address(raw_asset):
+                _asset_in_address = Web3.to_checksum_address(raw_asset)
+            else:
+                raise ValueError(f"Asset '{raw_asset}' is not a valid token symbol or address.")
+
         except Exception as e:
-            print(f"   ❌ [Executor] Failed to parse zkp_data JSON: {e}.")
+            print(f"   ❌ [Executor] Failed to parse zkp_data: {e}")
             return
 
-        _asset_out_address = TOKEN_ADDRESSES.get(strategy['asset_out'])
-        
+        _asset_out_symbol = strategy.get('asset_out', 'ETH')
+        _asset_out_address = TOKEN_ADDRESSES.get(_asset_out_symbol, TOKEN_ADDRESSES['ETH'])
         _recipient = Web3.to_checksum_address(strategy['recipient_address'])
-    
+        _minAmountOut = 0 
+        _fee = 3000 
         
-        _minAmountOut = 0 # For a demo, we can set slippage to 0
-        _fee = 3000 # Uniswap V3 0.3% fee tier
-        
-        if not all([_asset_in_address, _asset_out_address, _recipient]):
-             print(f"   ❌ [Executor] Invalid token symbols ('{strategy['asset_in']}', '{strategy['asset_out']}') or recipient address.")
-             return
+        print(f"   [Executor] Building swap transaction...")
+        print(f"     -> Asset In: {_asset_in_address}")
+        print(f"     -> Asset Out: {_asset_out_address}")
+        print(f"     -> Amount: {_amountIn}")
+        print(f"     -> Proof Length: {len(_proof_bytes)} bytes")
 
-        print(f"   [Executor] Building transaction for swap...")
-
-        # 5. Build the transaction
         tx = vault_contract.functions.swap(
             _asset_in_address,
             _asset_out_address,
@@ -91,22 +118,14 @@ def execute_trade(strategy, current_price):
         ).build_transaction({
             'from': executor_account.address,
             'nonce': w3.eth.get_transaction_count(executor_account.address),
-            'gas': 2000000,
+            'gas': 3000000,
             'gasPrice': w3.eth.gas_price
         })
 
-        # 6. Sign and send the transaction
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=EXECUTOR_PRIVATE_KEY)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         
         print(f"   [Executor] ✅ Swap transaction sent! Hash: {tx_hash.hex()}")
-        
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-        if receipt['status'] == 1:
-            print("   [Executor] ✅ Transaction successful!")
-        else:
-            print("   [Executor] ❌ Transaction FAILED on-chain.")
-        
         print("="*60)
 
     except Exception as e:
