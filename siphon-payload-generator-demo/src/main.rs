@@ -5,7 +5,7 @@ use bincode;
 use hex::encode;
 use reqwest;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value}; // Using Value for flexible JSON handling
+use serde_json::{json, Value}; 
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -20,7 +20,7 @@ struct StrategyInput {
     upper_bound: f64,
     lower_bound: f64,
     recipient_address: String,
-    zk_proof: Value, // 👈 Capture real ZK object
+    zk_proof: Value, 
 }
 
 #[derive(Serialize)]
@@ -50,6 +50,7 @@ async fn main() {
         .route("/generatePayload", post(handle_generate_payload))
         .layer(cors);
 
+    // NOTE: Runs on port 5003. Python Orchestrator should be on 5005.
     let addr = SocketAddr::from(([127, 0, 0, 1], 5003));
     println!("🚀 Payload Generator listening at http://{}", addr);
 
@@ -69,34 +70,39 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     let encrypted_upper = fhe_core::encrypt_price((input.upper_bound * 100.0) as u32, &client_key);
     let encrypted_lower = fhe_core::encrypt_price((input.lower_bound * 100.0) as u32, &client_key);
 
-    // 3️⃣ MAP ZK DATA
-    // We extract fields from the frontend JSON and map them to Python Executor format
+    // 3️⃣ Extract ZK Data
+    // 👇 CRITICAL FIX: Default to "0" (string) instead of empty string ""
+    // Python int() can parse "0", but it crashes on "".
+    let default_val = json!("0"); 
     
-    let default_val = json!("");
-    
-    // Frontend keys: "proof", "nullifierHash", "newCommitment", "atomicAmount"
+    // Extract standard ZK fields
     let proof = input.zk_proof.get("proof").unwrap_or(&default_val);
     let nullifier = input.zk_proof.get("nullifierHash").unwrap_or(&default_val);
     let new_commitment = input.zk_proof.get("newCommitment").unwrap_or(&default_val);
     
-    // Use atomicAmount if present (precision), otherwise fallback to calculation
+    // Extract Merkle Root (checks 'root' or 'stateRoot')
+    let root = input.zk_proof.get("root")
+        .or_else(|| input.zk_proof.get("stateRoot"))
+        .unwrap_or(&default_val);
+    
+    // Extract Amount (prefer atomic string if available for precision)
     let amount_val = input.zk_proof.get("atomicAmount")
         .cloned()
         .unwrap_or_else(|| json!((input.amount * 1_000_000.0) as u64));
 
-    // Construct JSON for Python: requires "publicInputs" with "asset"
+    // 4️⃣ Construct JSON for Python Executor
     let zkp_data_string = serde_json::to_string(&json!({
         "proof": proof,
         "publicInputs": {
+            "root": root,             
             "nullifier": nullifier,
             "newCommitment": new_commitment,
-            "asset": input.asset_in, // Passing symbol (e.g. "USDC"); Python handles lookup
+            "asset": input.asset_in, 
             "amount": amount_val
         }
     }))
     .unwrap();
 
-    // 4️⃣ Construct final payload
     let payload = StrategyPayload {
         user_id: input.user_id.clone(),
         strategy_type: input.strategy_type.clone(),
@@ -112,8 +118,7 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
         payload_id: Uuid::new_v4().to_string(),
     };
 
-    // 5️⃣ Send to Python orchestrator
-    // Ensure this matches your Flask app port
+    // 5️⃣ Send to Python Orchestrator
     let orchestrator_url = "http://localhost:5005/createStrategy"; 
     let client = reqwest::Client::new();
 
