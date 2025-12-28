@@ -3,41 +3,55 @@ version: '3.8'
 services:
   # 1. Python Trade Executor (The Manager)
   trade-executor:
-    build: ./syphon-executor  # Path to your Python project
-    container_name: syphon-trade-executor
+    # Ensure this points to your python folder (e.g. ./strategies-executor)
+    build: ./trade-executor
+    container_name: siphon-trade-executor
     ports:
       - "5005:5005"
     environment:
-      # Connect to the FHE Engine service defined below
+      # Connect to FHE Engine (service name 'fhe-engine' acts as hostname)
       - FHE_ENGINE_BRACKET_URL=http://fhe-engine:5001/evaluate_bracket_order
       - FHE_ENGINE_LIMIT_BUY_URL=http://fhe-engine:5001/evaluate_limit_buy
       - FHE_ENGINE_LIMIT_SELL_URL=http://fhe-engine:5001/evaluate_limit_sell
       
       # External Services
       - PYTH_HERMES_URL=https://hermes.pyth.network
+      - ARKIV_RPC_URL=https://mendoza.hoodi.arkiv.network/rpc
 
-      # Local Blockchain (Use host.docker.internal to reach Anvil on your machine)
-      - SEPOLIA_RPC_URL=http://host.docker.internal:8545
+      # Local Blockchain (Use host.docker.internal to reach Anvil on host)
+      - SEPOLIA_RPC_URL="https://eth-sepolia.g.alchemy.com/v2/QKpJJ0vfOqVsi5962oHUd"
       
       # Database
       - DATABASE_URI=sqlite:///strategies.db?timeout=30
 
-      # Secrets (These will be pulled from your local .env file)
+      # Secrets (Pass these from your .env file)
       - SYPHON_VAULT_CONTRACT_ADDRESS=${SYPHON_VAULT_CONTRACT_ADDRESS}
       - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
 
     extra_hosts:
-      - "host.docker.internal:host-gateway" # Allows access to localhost services like Anvil
+      - "host.docker.internal:host-gateway" # Critical for reaching local Anvil
     depends_on:
       - fhe-engine
     restart: unless-stopped
 
   # 2. Rust FHE Engine (The Calculator)
   fhe-engine:
-    build: ./fhe  # Path to your Rust FHE project
+    # Ensure this points to your Rust FHE folder (e.g. ./fhe)
+    build: ./fhe
     container_name: syphon-fhe-engine
     ports:
       - "5001:5001"
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+
+  # 3. Rust Payload Generator (The Encryptor)
+  payload-generator:
+    # Ensure this points to your new generator folder (e.g. ./siphon-payload-generator)
+    build: ./siphon-payload-generator-demo
+    container_name: siphon-payload-generator
+    ports:
+      - "5009:5009"
     environment:
       - RUST_LOG=info
     restart: unless-stopped

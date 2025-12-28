@@ -51,7 +51,7 @@ async fn main() {
         .layer(cors);
 
     // NOTE: Runs on port 5003. Python Orchestrator should be on 5005.
-    let addr = SocketAddr::from(([127, 0, 0, 1], 5003));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 5009));
     println!("🚀 Payload Generator listening at http://{}", addr);
 
     axum::Server::bind(&addr)
