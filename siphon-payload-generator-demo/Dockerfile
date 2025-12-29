@@ -30,8 +30,8 @@ RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /v
 # IMPORTANT: Replace 'syphon-payload-server' with the exact name from your Cargo.toml [package] section!
 COPY --from=builder /usr/src/app/target/release/syphon-payload-server .
 
-# Expose the port (5003 is the chosen port for this service)
-EXPOSE 5003
+# Expose the port (5009 is the chosen port for this service)
+EXPOSE 5009
 
 # Run the binary
 CMD ["./syphon-payload-server"]
