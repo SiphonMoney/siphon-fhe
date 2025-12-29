@@ -7,6 +7,7 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value}; 
 use std::net::SocketAddr;
+use std::env; // Import env to read environment variables
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
@@ -41,6 +42,7 @@ struct StrategyPayload {
 
 #[tokio::main]
 async fn main() {
+    // CORS: Allow Frontend (siphon.money) to talk to this backend
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
@@ -50,9 +52,13 @@ async fn main() {
         .route("/generatePayload", post(handle_generate_payload))
         .layer(cors);
 
-    // NOTE: Runs on port 5003. Python Orchestrator should be on 5005.
-    let addr = SocketAddr::from(([0, 0, 0, 0], 5009));
+    // PORT CONFIGURATION
+    // Listen on 5009 (matches your frontend/docker setup)
+    let port = 5009;
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    
     println!("🚀 Payload Generator listening at http://{}", addr);
+    println!("🔗 CORS enabled for all origins");
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
@@ -71,8 +77,6 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     let encrypted_lower = fhe_core::encrypt_price((input.lower_bound * 100.0) as u32, &client_key);
 
     // 3️⃣ Extract ZK Data
-    // 👇 CRITICAL FIX: Default to "0" (string) instead of empty string ""
-    // Python int() can parse "0", but it crashes on "".
     let default_val = json!("0"); 
     
     // Extract standard ZK fields
@@ -80,12 +84,12 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     let nullifier = input.zk_proof.get("nullifierHash").unwrap_or(&default_val);
     let new_commitment = input.zk_proof.get("newCommitment").unwrap_or(&default_val);
     
-    // Extract Merkle Root (checks 'root' or 'stateRoot')
+    // Extract Merkle Root
     let root = input.zk_proof.get("root")
         .or_else(|| input.zk_proof.get("stateRoot"))
         .unwrap_or(&default_val);
     
-    // Extract Amount (prefer atomic string if available for precision)
+    // Extract Amount
     let amount_val = input.zk_proof.get("atomicAmount")
         .cloned()
         .unwrap_or_else(|| json!((input.amount * 1_000_000.0) as u64));
@@ -118,11 +122,17 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
         payload_id: Uuid::new_v4().to_string(),
     };
 
-    // 5️⃣ Send to Python Orchestrator
-    let orchestrator_url = "http://localhost:5005/createStrategy"; 
+    // 5️⃣ Send to Python Orchestrator (Dynamic URL!)
+    // If running in Docker on Mac, use host.docker.internal
+    // If running in Cloud (Render/Fluence), use the ENV variable
+    let default_url = "http://host.docker.internal:5005/createStrategy";
+    let orchestrator_url = env::var("ORCHESTRATOR_URL").unwrap_or_else(|_| default_url.to_string());
+    
+    println!("➡️  Forwarding to Orchestrator at: {}", orchestrator_url);
+
     let client = reqwest::Client::new();
 
-    match client.post(orchestrator_url).json(&payload).send().await {
+    match client.post(&orchestrator_url).json(&payload).send().await {
         Ok(res) => {
             let status = res.status();
             if status.is_success() {
@@ -135,7 +145,7 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
             }
         }
         Err(e) => {
-            eprintln!("❌ Failed to reach orchestrator: {}", e);
+            eprintln!("❌ Failed to reach orchestrator at {}: {}", orchestrator_url, e);
             (StatusCode::BAD_GATEWAY, Json(json!({"status": "error", "details": e.to_string()})))
         }
     }
