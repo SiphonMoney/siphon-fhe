@@ -2,26 +2,24 @@ import os
 import json
 from web3 import Web3
 from config import (
-    SEPOLIA_RPC_URL, 
-    SYPHON_VAULT_CONTRACT_ADDRESS, 
+    SEPOLIA_RPC_URL,
+    ENTRYPOINT_CONTRACT_ADDRESS,
     EXECUTOR_PRIVATE_KEY
 )
 
 # --- TOKEN ADDRESSES (Sepolia) ---
 TOKEN_ADDRESSES = {
-    "ETH": Web3.to_checksum_address("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"), 
-    "USDC": Web3.to_checksum_address("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"), 
-    "WETH": Web3.to_checksum_address("0x7b79995e5f793A07Bc00c21412e50Eaae098E7f9")  
+    "ETH": Web3.to_checksum_address("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"),
+    "USDC": Web3.to_checksum_address("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
+    "WETH": Web3.to_checksum_address("0x7b79995e5f793A07Bc00c21412e50Eaae098E7f9")
 }
 
 # --- LOAD ABI ---
 try:
-    with open("SyphonVault.abi.json", "r") as f:
-        data = json.load(f)
-        # Handle both raw list and artifact format ({"abi": [...]})
-        CONTRACT_ABI = data["abi"] if "abi" in data else data
+    with open("Entrypoint.abi.json", "r") as f:
+        CONTRACT_ABI = json.load(f)
 except FileNotFoundError:
-    print("CRITICAL ERROR: SyphonVault.abi.json not found.")
+    print("CRITICAL ERROR: Entrypoint.abi.json not found.")
     CONTRACT_ABI = None
 
 # --- HELPERS ---
@@ -30,7 +28,7 @@ def safe_int(val):
         return 0
     try:
         return int(val)
-    except ValueError:
+    except (ValueError, TypeError):
         return 0
 
 def format_proof_to_uint_array(proof_list):
@@ -46,17 +44,17 @@ def format_proof_to_uint_array(proof_list):
                 if item.startswith("0x"):
                     formatted.append(int(item, 16))
                 else:
-                    formatted.append(int(item, 10))
-        except:
+                    formatted.append(int(item))
+        except (ValueError, TypeError):
             continue
     return formatted
 
 def execute_trade(strategy, current_price):
     print("\n" + "="*60)
     print(f"✅ EXECUTION: Trigger met for strategy '{strategy['id']}'")
-    
-    if not all([SEPOLIA_RPC_URL, SYPHON_VAULT_CONTRACT_ADDRESS, CONTRACT_ABI, EXECUTOR_PRIVATE_KEY]):
-        print("   ❌ [Executor] CRITICAL ERROR: Missing .env config.")
+
+    if not all([SEPOLIA_RPC_URL, ENTRYPOINT_CONTRACT_ADDRESS, CONTRACT_ABI, EXECUTOR_PRIVATE_KEY]):
+        print("   ❌ [Executor] CRITICAL ERROR: Missing .env config or ABI.")
         return
 
     try:
@@ -64,30 +62,33 @@ def execute_trade(strategy, current_price):
         w3 = Web3(Web3.HTTPProvider(SEPOLIA_RPC_URL))
         executor_account = w3.eth.account.from_key(EXECUTOR_PRIVATE_KEY)
         w3.eth.default_account = executor_account.address
-        
-        vault_contract = w3.eth.contract(address=SYPHON_VAULT_CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+
+        entrypoint_contract = w3.eth.contract(address=ENTRYPOINT_CONTRACT_ADDRESS, abi=CONTRACT_ABI)
 
         # 2. Parse ZK Data
         try:
             zk_payload = json.loads(strategy['zkp_data'])
             inputs = zk_payload.get('publicInputs', {})
-            
+
             raw_proof = zk_payload.get('proof', [])
             proof_array = format_proof_to_uint_array(raw_proof)
 
-            state_root = safe_int(inputs.get('root')) 
-            _nullifier = safe_int(inputs.get('nullifier'))
-            _newCommitment = safe_int(inputs.get('newCommitment'))
+            zk_proof_struct = {
+                "stateRoot": safe_int(inputs.get('root')),
+                "nullifier": safe_int(inputs.get('nullifier')),
+                "newCommitment": safe_int(inputs.get('newCommitment')),
+                "proof": proof_array
+            }
+
             _amountIn = safe_int(inputs.get('amount'))
-            
-            # Asset In Lookup
-            raw_asset = inputs.get('asset', '')
-            if raw_asset in TOKEN_ADDRESSES:
-                _asset_in_address = TOKEN_ADDRESSES[raw_asset]
-            elif w3.is_address(raw_asset):
-                _asset_in_address = Web3.to_checksum_address(raw_asset)
+
+            raw_asset_in = inputs.get('asset', '')
+            if raw_asset_in in TOKEN_ADDRESSES:
+                _srcToken = TOKEN_ADDRESSES[raw_asset_in]
+            elif w3.is_address(raw_asset_in):
+                _srcToken = Web3.to_checksum_address(raw_asset_in)
             else:
-                print(f"   ❌ [Executor] Invalid asset: '{raw_asset}'")
+                print(f"   ❌ [Executor] Invalid asset_in: '{raw_asset_in}'")
                 return
 
         except Exception as e:
@@ -95,53 +96,51 @@ def execute_trade(strategy, current_price):
             return
 
         # 3. BUILD TRANSACTION PARAMS
-        
-        # --- FIX 1: Map Input ETH -> WETH ---
-        if _asset_in_address == TOKEN_ADDRESSES["ETH"]:
-             print("   [Executor] Mapping Input ETH -> WETH")
-             _asset_in_address = TOKEN_ADDRESSES["WETH"]
-
-        # --- FIX 2: Map Output ETH -> WETH ---
-        _asset_out_symbol = strategy.get('asset_out', 'ETH')
-        
-        if _asset_out_symbol == "ETH":
-            print("   [Executor] Mapping Output ETH -> WETH")
-            _asset_out_address = TOKEN_ADDRESSES["WETH"]
+        raw_asset_out = strategy.get('asset_out', 'ETH')
+        if raw_asset_out in TOKEN_ADDRESSES:
+            _dstToken = TOKEN_ADDRESSES[raw_asset_out]
         else:
-            _asset_out_address = TOKEN_ADDRESSES.get(_asset_out_symbol, TOKEN_ADDRESSES["WETH"])
+            print(f"   ❌ [Executor] Invalid asset_out: '{raw_asset_out}'")
+            return
+
+        # TODO: The pool address must be part of the strategy data.
+        # Assuming it's passed in the strategy object for now.
+        _pool = strategy.get('pool_address') # This is an assumption
+        if not _pool or not w3.is_address(_pool):
+            print(f"   ❌ [Executor] Missing or invalid pool_address in strategy data.")
+            # Fallback for now - THIS NEEDS TO BE PROVIDED IN STRATEGY
+            _pool = Web3.to_checksum_address("0x3289680dD4d6C10bb19b899729cda5eEF58AEfF1") # WETH/USDC 0.05% on Sepolia, for testing
+            print(f"   ⚠️ [Executor] USING FALLBACK POOL ADDRESS: {_pool}")
+
 
         _recipient = Web3.to_checksum_address(strategy['recipient_address'])
-        _minAmountOut = 0 
-        _fee = 500  # 0.05% fee tier for better testnet liquidity
-        _router = "0xE592427A0AEce92De3Edee1F18E0157C05861564" # Uniswap Router
+        _minAmountOut = 0
+        _fee = 500  # 0.05% fee tier
 
-        # --- FIX 3: Correct Struct Size (6 items) ---
-        swap_param_struct = (
-            _asset_in_address,   # srcToken
-            _asset_out_address,  # dstToken
-            _recipient,          # recipient
-            _amountIn,           # amountIn
-            _minAmountOut,       # minAmountOut
-            _fee                 # fee
-        )
+        print(f"   [Executor] Building transaction for Entrypoint...")
+        print(f"     -> Pool: {_pool}")
+        print(f"     -> SrcToken: {_srcToken}")
+        print(f"     -> DstToken: {_dstToken}")
+        print(f"     -> AmountIn: {_amountIn}")
+        print(f"     -> Recipient: {_recipient}")
+        print(f"     -> ZKProof (root): {zk_proof_struct['stateRoot']}")
+        print(f"     -> ZKProof (nullifier): {zk_proof_struct['nullifier']}")
 
-        print(f"   [Executor] Building transaction...")
-        print(f"     -> Struct: {swap_param_struct}")
-        print(f"     -> Root: {state_root}")
-        print(f"     -> Nullifier: {_nullifier}")
 
         # 4. Build & Send
-        tx = vault_contract.functions.swap(
-            swap_param_struct,  
-            _router,            
-            state_root,         
-            _nullifier,        
-            _newCommitment,     
-            proof_array         
+        tx = entrypoint_contract.functions.swap(
+            _pool,
+            _srcToken,
+            _dstToken,
+            _recipient,
+            _amountIn,
+            _minAmountOut,
+            _fee,
+            zk_proof_struct
         ).build_transaction({
             'from': executor_account.address,
             'nonce': w3.eth.get_transaction_count(executor_account.address),
-            'gas': 3000000,
+            'gas': 3000000, # May need adjustment
             'gasPrice': w3.eth.gas_price
         })
 

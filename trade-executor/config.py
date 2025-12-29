@@ -20,14 +20,11 @@ SEPOLIA_RPC_URL = os.getenv("SEPOLIA_RPC_URL")
 # --- On-Chain Addresses & Keys ---
 # Using Web3.to_checksum_address ensures the address is in the correct format
 # Make sure your .env file does not have trailing spaces in the address string!
-contract_address_raw = os.getenv("SYPHON_VAULT_CONTRACT_ADDRESS")
+contract_address_raw = os.getenv("ENTRYPOINT_CONTRACT_ADDRESS")
 if contract_address_raw:
-    SYPHON_VAULT_CONTRACT_ADDRESS = Web3.to_checksum_address(contract_address_raw.strip())
+    ENTRYPOINT_CONTRACT_ADDRESS = Web3.to_checksum_address(contract_address_raw.strip())
 else:
-    SYPHON_VAULT_CONTRACT_ADDRESS = None
-
-# For this architecture, the Verifier and Vault are the same contract (Entrypoint)
-VERIFIER_CONTRACT_ADDRESS = SYPHON_VAULT_CONTRACT_ADDRESS
+    ENTRYPOINT_CONTRACT_ADDRESS = None
 
 # The private key for the account that will execute trades
 EXECUTOR_PRIVATE_KEY = os.getenv("EXECUTOR_PRIVATE_KEY")
