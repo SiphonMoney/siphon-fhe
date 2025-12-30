@@ -1,11 +1,17 @@
 import os
 import json
+import sys
+from dotenv import load_dotenv
 from web3 import Web3
-from config import (
-    SEPOLIA_RPC_URL,
-    ENTRYPOINT_CONTRACT_ADDRESS,
-    EXECUTOR_PRIVATE_KEY
-)
+from web3.middleware import geth_poa_middleware
+
+# --- LOAD ENVIRONMENT VARIABLES ---
+load_dotenv(override=True)
+
+SEPOLIA_RPC_URL = os.getenv("SEPOLIA_RPC_URL")
+ENTRYPOINT_CONTRACT_ADDRESS = os.getenv("ENTRYPOINT_CONTRACT_ADDRESS")
+EXECUTOR_PRIVATE_KEY = os.getenv("EXECUTOR_PRIVATE_KEY")
+ABI_PATH = os.getenv("ABI_PATH", "Entrypoint.abi.json") # Default to local file if not set
 
 # --- TOKEN ADDRESSES (Sepolia) ---
 TOKEN_ADDRESSES = {
@@ -14,13 +20,29 @@ TOKEN_ADDRESSES = {
     "WETH": Web3.to_checksum_address("0x7b79995e5f793A07Bc00c21412e50Eaae098E7f9")
 }
 
-# --- LOAD ABI ---
-try:
-    with open("Entrypoint.abi.json", "r") as f:
-        CONTRACT_ABI = json.load(f)
-except FileNotFoundError:
-    print("CRITICAL ERROR: Entrypoint.abi.json not found.")
-    CONTRACT_ABI = None
+# --- LOAD ABI FUNCTION ---
+def load_contract_abi(path):
+    try:
+        if not os.path.exists(path):
+            # Try looking in an 'abis' folder if not found in root
+            alt_path = os.path.join("abis", path)
+            if os.path.exists(alt_path):
+                path = alt_path
+            else:
+                raise FileNotFoundError(f"Path does not exist: {path}")
+
+        with open(path, "r") as f:
+            loaded_json = json.load(f)
+            # Handle Hardhat/Foundry artifacts
+            if isinstance(loaded_json, dict) and "abi" in loaded_json:
+                return loaded_json["abi"]
+            return loaded_json
+    except Exception as e:
+        print(f"❌ [Executor] Error loading ABI from {path}: {e}")
+        return None
+
+# Load ABI globally once
+CONTRACT_ABI = load_contract_abi(ABI_PATH)
 
 # --- HELPERS ---
 def safe_int(val):
@@ -53,19 +75,31 @@ def execute_trade(strategy, current_price):
     print("\n" + "="*60)
     print(f"✅ EXECUTION: Trigger met for strategy '{strategy['id']}'")
 
-    if not all([SEPOLIA_RPC_URL, ENTRYPOINT_CONTRACT_ADDRESS, CONTRACT_ABI, EXECUTOR_PRIVATE_KEY]):
-        print("   ❌ [Executor] CRITICAL ERROR: Missing .env config or ABI.")
+    # 1. Validation Checks
+    missing_vars = []
+    if not SEPOLIA_RPC_URL: missing_vars.append("SEPOLIA_RPC_URL")
+    if not ENTRYPOINT_CONTRACT_ADDRESS: missing_vars.append("ENTRYPOINT_CONTRACT_ADDRESS")
+    if not EXECUTOR_PRIVATE_KEY: missing_vars.append("EXECUTOR_PRIVATE_KEY")
+    if not CONTRACT_ABI: missing_vars.append("ABI (Check ABI_PATH)")
+
+    if missing_vars:
+        print(f"   ❌ [Executor] CRITICAL ERROR: Missing config: {', '.join(missing_vars)}")
         return
 
     try:
-        # 1. Connect
+        # 2. Connect to Blockchain
         w3 = Web3(Web3.HTTPProvider(SEPOLIA_RPC_URL))
-        executor_account = w3.eth.account.from_key(EXECUTOR_PRIVATE_KEY)
-        w3.eth.default_account = executor_account.address
+        # Inject PoA middleware for Sepolia/testnets
+        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
+        if not w3.is_connected():
+            print("   ❌ [Executor] Could not connect to RPC.")
+            return
+
+        executor_account = w3.eth.account.from_key(EXECUTOR_PRIVATE_KEY)
         entrypoint_contract = w3.eth.contract(address=ENTRYPOINT_CONTRACT_ADDRESS, abi=CONTRACT_ABI)
 
-        # 2. Parse ZK Data
+        # 3. Parse ZK Data
         try:
             zk_payload = json.loads(strategy['zkp_data'])
             inputs = zk_payload.get('publicInputs', {})
@@ -95,22 +129,24 @@ def execute_trade(strategy, current_price):
             print(f"   ❌ [Executor] Failed to parse zkp_data: {e}")
             return
 
-        # 3. BUILD TRANSACTION PARAMS
+        # 4. BUILD TRANSACTION PARAMS
         raw_asset_out = strategy.get('asset_out', 'ETH')
         if raw_asset_out in TOKEN_ADDRESSES:
             _dstToken = TOKEN_ADDRESSES[raw_asset_out]
+        elif w3.is_address(raw_asset_out):
+            _dstToken = Web3.to_checksum_address(raw_asset_out)
         else:
             print(f"   ❌ [Executor] Invalid asset_out: '{raw_asset_out}'")
             return
 
-        # TODO: The pool address must be part of the strategy data.
-        # Assuming it's passed in the strategy object for now.
-        _pool = strategy.get('pool_address') # This is an assumption
+        # Use Pool Address from Strategy or Fallback
+        _pool = strategy.get('pool_address')
         if not _pool or not w3.is_address(_pool):
-            print(f"   ❌ [Executor] Missing or invalid pool_address in strategy data.")
-            # Fallback for now - THIS NEEDS TO BE PROVIDED IN STRATEGY
-            _pool = Web3.to_checksum_address("0x3289680dD4d6C10bb19b899729cda5eEF58AEfF1") # WETH/USDC 0.05% on Sepolia, for testing
-            print(f"   ⚠️ [Executor] USING FALLBACK POOL ADDRESS: {_pool}")
+            # Fallback WETH/USDC Pool on Sepolia (Example)
+            _pool = Web3.to_checksum_address("0x3289680dD4d6C10bb19b899729cda5eEF58AEfF1")
+            print(f"   ⚠️ [Executor] Missing strategy pool_address. Using Fallback: {_pool}")
+        else:
+            _pool = Web3.to_checksum_address(_pool)
 
 
         _recipient = Web3.to_checksum_address(strategy['recipient_address'])
@@ -118,17 +154,11 @@ def execute_trade(strategy, current_price):
         _fee = 500  # 0.05% fee tier
 
         print(f"   [Executor] Building transaction for Entrypoint...")
-        print(f"     -> Pool: {_pool}")
-        print(f"     -> SrcToken: {_srcToken}")
-        print(f"     -> DstToken: {_dstToken}")
-        print(f"     -> AmountIn: {_amountIn}")
-        print(f"     -> Recipient: {_recipient}")
-        print(f"     -> ZKProof (root): {zk_proof_struct['stateRoot']}")
-        print(f"     -> ZKProof (nullifier): {zk_proof_struct['nullifier']}")
+        print(f"     -> Amount In: {_amountIn}")
+        print(f"     -> Asset Path: {_srcToken} -> {_dstToken}")
 
-
-        # 4. Build & Send
-        tx = entrypoint_contract.functions.swap(
+        # 5. Build & Send (EIP-1559 Compatible)
+        tx_func = entrypoint_contract.functions.swap(
             _pool,
             _srcToken,
             _dstToken,
@@ -137,18 +167,34 @@ def execute_trade(strategy, current_price):
             _minAmountOut,
             _fee,
             zk_proof_struct
-        ).build_transaction({
+        )
+
+        # Estimate gas to prevent under-gassing failures
+        try:
+            estimated_gas = tx_func.estimate_gas({'from': executor_account.address})
+            gas_limit = int(estimated_gas * 1.2) # Add 20% buffer
+        except Exception as gas_err:
+            print(f"   ⚠️ Gas estimation failed ({gas_err}), using default.")
+            gas_limit = 3000000
+
+        tx = tx_func.build_transaction({
             'from': executor_account.address,
             'nonce': w3.eth.get_transaction_count(executor_account.address),
-            'gas': 3000000, # May need adjustment
-            'gasPrice': w3.eth.gas_price
+            'gas': gas_limit,
+            'maxFeePerGas': w3.to_wei('50', 'gwei'),
+            'maxPriorityFeePerGas': w3.to_wei('2', 'gwei'),
+            'chainId': 11155111 # Sepolia
         })
 
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=EXECUTOR_PRIVATE_KEY)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        print(f"   [Executor] ✅ Transaction sent! Hash: {tx_hash.hex()}")
+        
+        print(f"   ✅ Transaction sent! Hash: {tx_hash.hex()}")
+        print(f"   🔗 https://sepolia.etherscan.io/tx/{tx_hash.hex()}")
         print("="*60)
 
     except Exception as e:
         print(f"   ❌ [Executor] On-chain error: {e}")
+        import traceback
+        traceback.print_exc()
         print("="*60)

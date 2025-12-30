@@ -125,7 +125,7 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     // 5️⃣ Send to Python Orchestrator (Dynamic URL!)
     // If running in Docker on Mac, use host.docker.internal
     // If running in Cloud (Render/Fluence), use the ENV variable
-    let default_url = "http://host.docker.internal:5005/createStrategy";
+    let default_url = "http://trade-executor:5005/createStrategy";
     let orchestrator_url = env::var("ORCHESTRATOR_URL").unwrap_or_else(|_| default_url.to_string());
     
     println!("➡️  Forwarding to Orchestrator at: {}", orchestrator_url);

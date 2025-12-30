@@ -15,7 +15,8 @@ PYTH_HERMES_URL = os.getenv("PYTH_HERMES_URL")
 # ARKIV_RPC_URL = os.getenv("ARKIV_RPC_URL") # Uncomment if using Arkiv
 
 DATABASE_URI = os.getenv("DATABASE_URI")
-SEPOLIA_RPC_URL = os.getenv("SEPOLIA_RPC_URL")
+raw_rpc = os.getenv("SEPOLIA_RPC_URL", "")
+SEPOLIA_RPC_URL = raw_rpc.strip('"').strip("'")
 
 # --- On-Chain Addresses & Keys ---
 # Using Web3.to_checksum_address ensures the address is in the correct format

@@ -19,7 +19,7 @@ services:
       - ARKIV_RPC_URL=https://mendoza.hoodi.arkiv.network/rpc
 
       # Local Blockchain (Use host.docker.internal to reach Anvil on host)
-      - SEPOLIA_RPC_URL="https://eth-sepolia.g.alchemy.com/v2/QKpJJ0vfOqVsi5962oHUd"
+      - SEPOLIA_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/QKpJJ0vfOqVsi5962oHUd
       
       # Database
       - DATABASE_URI=sqlite:///strategies.db?timeout=30
