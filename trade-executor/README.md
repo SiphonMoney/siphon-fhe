@@ -1,95 +1,104 @@
-# Syphon Trade Executor (Python Backend)
+# Trade Executor (`trade-executor`)
 
-This service, named the **Trade Executor**, is the central control plane for the Syphon Money protocol. It handles all business logic, order persistence, external data retrieval (Oracle), and transaction finalization. It offloads all cryptographic processing to the dedicated **Rust FHE Engine**.
+The **Trade Executor** is the Python backend that:
 
-## Architecture Role
+- receives **encrypted** strategies from the Payload Generator (`POST /createStrategy`)
+- stores strategies in **SQLite** (encrypted/compressed fields handled in the model layer)
+- runs a background **scheduler** that fetches live prices and evaluates pending strategies via the Rust **FHE Engine**
+- when a strategy triggers, optionally performs **on-chain execution** (requires RPC + contract config)
 
-The Executor is the central backend in a four-part distributed architecture:
-
-1.  **Frontend dApp (Next.js @ `localhost:3000`):** The user-facing interface. It accepts plaintext strategy inputs from the user.
-2.  **Payload Generator (Rust @ `localhost:5003`):** A client-side server that receives plaintext from the dApp, generates FHE keys, encrypts the strategy, and forwards the encrypted payload.
-3.  **Trade Executor (This Service @ `localhost:5000`):** Manages the persistent Order Book, orchestrates the workflow, fetches market data, and triggers executions.
-4.  **Rust FHE Engine (@ `localhost:5001`):** A dedicated microservice that performs computationally intensive homomorphic comparisons.
-
-## Core Features
-
-* **API Gateway:** Exposes a secure REST endpoint (`/createStrategy`) for the **Rust Payload Generator** to submit fully encrypted strategies.
-* **Order Persistence:** Stores the complete, encrypted Order Book in a SQLite database (`strategies.db`), ensuring reliable tracking of all active trading strategies.
-* **Real-Time Oracle:** Runs a background scheduler that fetches live price data from the Pyth Network Hermes API on a fixed interval.
-* **FHE Orchestration:** Passes the live market price (plaintext) and the encrypted strategy bounds (ciphertext) to the Rust FHE Engine (`localhost:5001`) for a secure, private comparison.
-* **Transaction Finalization:** Upon receiving a `true` signal from the Rust engine, it simulates and finalizes the authorized, on-chain swap transaction.
-
-## Technology Stack
-
-| Component | Technology | Role |
-| :--- | :--- | :--- |
-| **Server/API** | Python 3.9, Flask, Gunicorn | Main application framework and production server. |
-| **Database** | SQLite + SQLAlchemy | Persistent storage for encrypted strategies. |
-| **Environment Mgmt** | Conda | Manages Python version and dependencies. |
-| **Network** | Requests | Client for the Pyth Oracle and Rust FHE Engine. |
-| **Blockchain** | Web3.py | For interacting Onchain. |
+For the full multi-service architecture, see `../README.md`.
 
 ---
 
-## Setup & Running the Full Demo
+## Service API
 
-This project is configured for a stable local development environment using Conda.
+- `GET /health` (no auth)
+- `POST /createStrategy` (requires `X-API-TOKEN`)
 
-### Prerequisites
+Default port: `5005`
 
-* WSL2/Linux
-* Conda environment manager
-* Node.js/npm (for the Next.js frontend)
-* Rust toolchain (for the FHE Engine & Payload Generator)
+---
 
-### Environment Setup (Conda)
+## Running the full stack (recommended)
 
-You must create and activate the correct Python environment:
+From `strategies-executor/`:
 
-1.  **Navigate to the executor directory**
-    ```bash
-    cd trade-executor
-    ```
-2.  **Create the environment (if not done already)**
-    ```bash
-    conda create --name siphon python=3.9 -y
-    ```
-3.  **Activate the environment**
-    ```bash
-    conda activate siphon
-    ```
-4.  **Install all dependencies**
-    ```bash
-    pip install -r requirements.txt
-    ```
+```bash
+docker compose up --build
+```
 
-### Configuration & Initialization
+This starts:
+- Trade Executor: `http://localhost:5005`
+- FHE Engine: `http://localhost:5001/evaluateStrategy`
+- Payload Generator: `http://localhost:5009/generatePayload`
 
-Before starting the server, you must provide your network addresses and initialize the database.
+---
 
-**python init_db.py**
-    also you need in the .env file
-    ```
-    DATABASE_URI="sqlite:///strategies.db?timeout=20000"
-    ```
-    and 
-    **To run the server** 
-    ```
-    gunicorn --bind 0.0.0.0:5005 --workers 1 --timeout 3000 "app:app"
-    ```
-    paste this in terminal
+## Run locally (dev)
 
-**A. Update Configuration**
+### Prereqs
 
-Edit the `.env` file in the project root with your local Anvil blockchain settings:
+- Python 3.9+
+- Rust toolchain
 
-```dotenv
-# CRITICAL: Address for the Rust FHE Engine
-FHE_ENGINE_URL="http://localhost:5001/evaluateStrategy"
+### 1) Trade Executor (Python)
 
-# Local Anvil Node
-SEPOLIA_RPC_URL="[http://127.0.0.1:8545](http://127.0.0.1:8545)"
+```bash
+cd strategies-executor/trade-executor
+pip install -r requirements.txt
+python init_db.py
+gunicorn --bind 0.0.0.0:5005 --workers 1 --timeout 3000 "app:app"
+```
 
-# Deployed Contract Addresses
-SYPHON_VAULT_CONTRACT_ADDRESS="[Your Deployed Vault Address]"
-VERIFIER_CONTRACT_ADDRESS="[Your Deployed Verifier Address]"
+Minimum environment:
+
+```bash
+export DATABASE_URI="sqlite:///strategies.db?timeout=20000"
+export FHE_ENGINE_URL="http://localhost:5001/evaluateStrategy"
+export API_TOKEN="change-me"
+```
+
+### 2) FHE Engine (Rust)
+
+```bash
+cd strategies-executor/fhe
+export API_TOKEN="change-me"
+cargo run --release
+```
+
+### 3) Payload Generator (Rust)
+
+```bash
+cd strategies-executor/siphon-payload-generator-demo
+cp env.template .env
+# set API_TOKEN=change-me (and optionally ORCHESTRATOR_URL / MPC URLs)
+cargo run --release
+```
+
+---
+
+## On-chain execution (optional)
+
+If you want the Trade Executor to actually submit transactions after a trigger, you must configure:
+
+```bash
+export SEPOLIA_RPC_URL="..."
+export ENTRYPOINT_CONTRACT_ADDRESS="0x..."
+export EXECUTOR_PRIVATE_KEY="0x..."
+export ABI_PATH="Entrypoint.abi.json"
+```
+
+Without these, the service can still accept/store strategies and run evaluations, but trade execution will be skipped/fail when triggered.
+
+---
+
+## Quick checks
+
+```bash
+curl http://localhost:5005/health
+```
+
+If you see `401 Unauthorized` on `/createStrategy`, make sure:
+- Payload Generator sends `X-API-TOKEN`
+- `API_TOKEN` matches across Trade Executor + Payload Generator + FHE Engine

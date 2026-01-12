@@ -5,7 +5,7 @@ from web3 import Web3
 load_dotenv()
 
 # --- Service & On-Chain URLs ---
-FHE_ENGINE_URL = os.getenv("FHE_ENGINE_URL")
+FHE_ENGINE_URL = os.getenv("FHE_ENGINE_URL", "http://localhost:5001/evaluateStrategy")
 # Specialized endpoints for the FHE engine
 FHE_ENGINE_BRACKET_URL = os.getenv("FHE_ENGINE_BRACKET_URL", "http://localhost:5001/evaluate_bracket_order")
 FHE_ENGINE_LIMIT_BUY_URL = os.getenv("FHE_ENGINE_LIMIT_BUY_URL", "http://localhost:5001/evaluate_limit_buy")

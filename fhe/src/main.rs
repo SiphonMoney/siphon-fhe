@@ -1,18 +1,25 @@
 mod handlers;
 mod fhe_engine;
 mod config;
+mod mpc_client;
+mod auth;
 
-use axum::{routing::post, Router, extract::DefaultBodyLimit};
+use axum::{routing::post, Router, extract::DefaultBodyLimit, middleware};
 use handlers::evaluation_handler;
 use tower_http::cors::CorsLayer;
 use std::net::SocketAddr;
+use auth::auth_middleware;
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file
+    dotenv::dotenv().ok();
+    
     println!("--- Starting Syphon FHE Co-Processor (Rust - REAL COMPUTE MODE) ---");
     
     let app = Router::new()
         .route("/evaluateStrategy", post(evaluation_handler::evaluate_strategy))
+        .layer(middleware::from_fn(auth_middleware)) // Add authentication
         .layer(CorsLayer::permissive()) 
         .layer(DefaultBodyLimit::max(50000000000 * 1024 * 1024)); 
 

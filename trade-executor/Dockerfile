@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies for web3.py
+# Install system dependencies for web3.py/cryptography builds
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc-dev \
@@ -17,7 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Make entrypoint script executable
+RUN chmod +x entrypoint.sh
+
 EXPOSE 5005
 
-# Initialize DB and start Gunicorn
-CMD ["sh", "-c", "python init_db.py && gunicorn --bind 0.0.0.0:5005 --workers 1 --timeout 3000 'app:app'"]
+# Use entrypoint script for DB init + start
+ENTRYPOINT ["./entrypoint.sh"]

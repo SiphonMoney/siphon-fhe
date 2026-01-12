@@ -21,3 +21,14 @@ reqwest = { version = "0.11", features = ["json"] }
 
 # Encryption
 tfhe = { version = "0.5", features = ["integer", "seeder_unix"] }
+
+# Crypto utilities
+sha2 = "0.10"
+rand = "0.8"
+rand_chacha = "0.3"
+
+# For key sharing (we'll implement simple XOR-based sharing)
+# In production, use a proper secret sharing library
+
+# Environment variable loading (commented out due to network issues - using manual .env parsing)
+# dotenv = "0.15"

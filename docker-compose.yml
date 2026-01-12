@@ -10,6 +10,7 @@ services:
       - "5005:5005"
     environment:
       # Connect to FHE Engine (service name 'fhe-engine' acts as hostname)
+      - FHE_ENGINE_URL=http://fhe-engine:5001/evaluateStrategy
       - FHE_ENGINE_BRACKET_URL=http://fhe-engine:5001/evaluate_bracket_order
       - FHE_ENGINE_LIMIT_BUY_URL=http://fhe-engine:5001/evaluate_limit_buy
       - FHE_ENGINE_LIMIT_SELL_URL=http://fhe-engine:5001/evaluate_limit_sell
@@ -23,6 +24,9 @@ services:
       
       # Database
       - DATABASE_URI=sqlite:///strategies.db?timeout=30
+
+      # Auth (must match across services)
+      - API_TOKEN=${API_TOKEN}
 
       # Secrets (Pass these from your .env file)
       - SYPHON_VAULT_CONTRACT_ADDRESS=${SYPHON_VAULT_CONTRACT_ADDRESS}
@@ -43,6 +47,7 @@ services:
       - "5001:5001"
     environment:
       - RUST_LOG=info
+      - API_TOKEN=${API_TOKEN}
     restart: unless-stopped
 
   # 3. Rust Payload Generator (The Encryptor)
@@ -54,4 +59,6 @@ services:
       - "5009:5009"
     environment:
       - RUST_LOG=info
+      - ORCHESTRATOR_URL=http://trade-executor:5005/createStrategy
+      - API_TOKEN=${API_TOKEN}
     restart: unless-stopped

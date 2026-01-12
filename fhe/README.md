@@ -14,9 +14,16 @@ This server is designed to work in tandem with a primary trade executor backend 
 
 ### Using Cargo (for development)
 
-1.  Navigate to the `syphon-fhe-server` directory.
-2.  Build and run the server in release mode for optimal performance:
+1.  Navigate to this folder:
+    ```bash
+    cd strategies-executor/fhe
+    ```
+2.  (Recommended) Set an API token to match the other services:
+    ```bash
+    export API_TOKEN="change-me"
+    ```
+3.  Build and run the server in release mode for optimal performance:
     ```bash
     cargo run --release
     ```
-3.  The server will start and listen on `http://localhost:5001`.
+4.  The server will start and listen on `http://localhost:5001/evaluateStrategy`.

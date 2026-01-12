@@ -2,6 +2,7 @@ use axum::{http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use tfhe::integer::{RadixClientKey, RadixCiphertext, ServerKey};
 use crate::fhe_engine::core as fhe_core;
+use crate::mpc_client::MPCClient;
 
 
 #[derive(Deserialize)]
@@ -11,7 +12,10 @@ pub struct EvaluationPayload {
     encrypted_lower_bound: String,
     server_key: String,
     current_price_cents: u32,
-    encrypted_client_key: String, 
+    encrypted_client_key: Option<String>, // Optional - only if shares NOT stored on MPC
+    mpc_public_key_set: Option<String>, // MPC public key set for distributed key
+    mpc_share_indices: Option<Vec<usize>>, // Which MPC servers hold shares
+    fhe_key_id: Option<String>, // Key ID when shares are stored on MPC servers
 }
 
 #[derive(Serialize)]
@@ -63,7 +67,58 @@ pub async fn evaluate_strategy(
         }
     };
     
-    let is_triggered = simulate_tee_decryption(&encrypted_result, &payload.encrypted_client_key);
+    // 3. Decrypt the result - ALWAYS use MPC if key_id is provided (no direct decryption)
+    let is_triggered = if let Some(key_id) = &payload.fhe_key_id {
+        println!("[Rust FHE Engine] Using MPC threshold decryption (key_id: {})...", key_id);
+        
+        // Serialize the encrypted result for MPC servers
+        let encrypted_result_hex = hex::encode(bincode::serialize(&encrypted_result).unwrap());
+        
+        // Create MPC client and request threshold decryption
+        let mpc_client = MPCClient::new();
+        
+        // Check if MPC servers are available
+        let mpc_available = mpc_client.check_health().await;
+        
+        if mpc_available {
+            println!("[Rust FHE Engine] MPC servers available, requesting threshold decryption...");
+            
+            // Request threshold decryption using key shares stored on MPC servers
+            // Full key is NEVER reconstructed - MPC servers use their shares directly
+            match mpc_client.request_mpc_decryption(
+                key_id, // Use key_id instead of full key
+                &encrypted_result_hex,
+                "fhe_engine",
+            ).await {
+                Ok(decrypted_value) => {
+                    println!("[Rust FHE Engine] ✅ MPC threshold decryption successful: {}", decrypted_value);
+                    decrypted_value == 1
+                }
+                Err(e) => {
+                    eprintln!("[Rust FHE Engine] ❌ MPC threshold decryption failed: {}", e);
+                    eprintln!("[Rust FHE Engine] ❌ Cannot fall back - threshold decryption required");
+                    // Return error - no fallback to direct decryption
+                    return (StatusCode::SERVICE_UNAVAILABLE, Json(EvaluationResponse { 
+                        is_triggered: false 
+                    }));
+                }
+            }
+        } else {
+            eprintln!("[Rust FHE Engine] ❌ MPC servers not available - threshold decryption required");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(EvaluationResponse { 
+                is_triggered: false 
+            }));
+        }
+    } else if let Some(client_key_hex) = &payload.encrypted_client_key {
+        // Fallback: Only if no MPC key_id and client_key provided (legacy support)
+        println!("[Rust FHE Engine] ⚠️  No MPC key_id, using direct decryption (legacy mode)");
+        simulate_tee_decryption(&encrypted_result, client_key_hex)
+    } else {
+        eprintln!("[Rust FHE Engine] ❌ No decryption method available - missing both key_id and client_key");
+        return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { 
+            is_triggered: false 
+        }));
+    };
 
     println!("[Rust FHE Engine] Real FHE evaluation complete. Responding with 'is_triggered: {}'", is_triggered);
     (StatusCode::OK, Json(EvaluationResponse { is_triggered }))
