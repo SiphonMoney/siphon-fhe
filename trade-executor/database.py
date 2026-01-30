@@ -93,7 +93,11 @@ class Strategy(db.Model):
     mpc_public_key_set = db.Column(db.Text, nullable=True)  # MPC public key set (smaller, hash-based)
     fhe_key_id = db.Column(db.String, nullable=True, index=True)  # Key ID when shares stored on MPC (no full key stored)
     status = db.Column(db.String, default='PENDING', nullable=False, index=True)
-    
+
+    # ZK Privacy Pool Integration
+    utxo_commitments = db.Column(db.Text, nullable=True)  # JSON array of UTXO commitment strings
+    is_private = db.Column(db.Boolean, default=True, nullable=False, index=True)  # Whether to use ZK pool
+
     # Timestamps for cleanup
     created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -118,6 +122,8 @@ class Strategy(db.Model):
             'mpc_share_indices': json.loads(self.mpc_share_indices) if self.mpc_share_indices and isinstance(self.mpc_share_indices, str) else self.mpc_share_indices,
             'fhe_key_id': self.fhe_key_id,  # Key ID when shares are on MPC servers
             'status': self.status,
+            'utxo_commitments': self.utxo_commitments,  # ZK pool UTXOs
+            'is_private': self.is_private,  # Use ZK pool or not
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -1,48 +1,31 @@
 import os
 import json
-import sys
+import base58
+import base64
+import requests
 from dotenv import load_dotenv
-from web3 import Web3
-from web3.middleware import geth_poa_middleware
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.system_program import ID as SYSTEM_PROGRAM_ID
+from solana.rpc.api import Client
+from solana.rpc.commitment import Confirmed
+from solana.transaction import Transaction
+from solders.instruction import Instruction, AccountMeta
 
 # --- LOAD ENVIRONMENT VARIABLES ---
 load_dotenv(override=True)
 
-SEPOLIA_RPC_URL = os.getenv("SEPOLIA_RPC_URL")
-ENTRYPOINT_CONTRACT_ADDRESS = os.getenv("ENTRYPOINT_CONTRACT_ADDRESS")
-EXECUTOR_PRIVATE_KEY = os.getenv("EXECUTOR_PRIVATE_KEY")
-ABI_PATH = os.getenv("ABI_PATH", "Entrypoint.abi.json") # Default to local file if not set
-
-# --- TOKEN ADDRESSES (Sepolia) ---
-TOKEN_ADDRESSES = {
-    "ETH": Web3.to_checksum_address("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"),
-    "USDC": Web3.to_checksum_address("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
-    "WETH": Web3.to_checksum_address("0x7b79995e5f793A07Bc00c21412e50Eaae098E7f9")
-}
-
-# --- LOAD ABI FUNCTION ---
-def load_contract_abi(path):
-    try:
-        if not os.path.exists(path):
-            # Try looking in an 'abis' folder if not found in root
-            alt_path = os.path.join("abis", path)
-            if os.path.exists(alt_path):
-                path = alt_path
-            else:
-                raise FileNotFoundError(f"Path does not exist: {path}")
-
-        with open(path, "r") as f:
-            loaded_json = json.load(f)
-            # Handle Hardhat/Foundry artifacts
-            if isinstance(loaded_json, dict) and "abi" in loaded_json:
-                return loaded_json["abi"]
-            return loaded_json
-    except Exception as e:
-        print(f"❌ [Executor] Error loading ABI from {path}: {e}")
-        return None
-
-# Load ABI globally once
-CONTRACT_ABI = load_contract_abi(ABI_PATH)
+from config import (
+    SOLANA_RPC_URL,
+    SOLANA_NETWORK,
+    SIPHON_PROGRAM_ID,
+    EXECUTOR_PRIVATE_KEY,
+    SOLANA_TOKEN_MINTS,
+    MAINNET_TOKEN_MINTS,
+    JUPITER_API_URL,
+    RANGE_API_URL,
+    RANGE_API_KEY,
+)
 
 # --- HELPERS ---
 def safe_int(val):
@@ -53,148 +36,405 @@ def safe_int(val):
     except (ValueError, TypeError):
         return 0
 
-def format_proof_to_uint_array(proof_list):
-    """Converts a list of hex/decimal proof strings to a list of Integers."""
-    if not isinstance(proof_list, list):
-        return []
-    formatted = []
-    for item in proof_list:
-        try:
-            if isinstance(item, int):
-                formatted.append(item)
-            elif isinstance(item, str):
-                if item.startswith("0x"):
-                    formatted.append(int(item, 16))
-                else:
-                    formatted.append(int(item))
-        except (ValueError, TypeError):
-            continue
-    return formatted
+# Token decimals for conversion
+TOKEN_DECIMALS = {
+    'SOL': 9,
+    'USDC': 6,
+    'USDT': 6,
+    'USD': 6,  # USD Dev token on devnet
+}
 
+# Devnet USD Dev token for mock swaps
+USD_DEV_MINT = "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr"
+
+def amount_to_lamports(amount, asset='SOL'):
+    """Convert float amount to smallest units (lamports for SOL, micro units for SPL)."""
+    if amount is None or amount == "":
+        return 0
+    try:
+        amount_float = float(amount)
+        decimals = TOKEN_DECIMALS.get(asset.upper(), 9)
+        return int(amount_float * (10 ** decimals))
+    except (ValueError, TypeError):
+        return 0
+
+def get_executor_keypair():
+    """Load executor keypair from private key (base58 encoded)."""
+    if not EXECUTOR_PRIVATE_KEY:
+        return None
+    try:
+        secret_key = base58.b58decode(EXECUTOR_PRIVATE_KEY)
+        return Keypair.from_bytes(secret_key)
+    except Exception as e:
+        print(f"   ❌ [Executor] Failed to load keypair: {e}")
+        return None
+
+def get_token_mint(token_symbol):
+    """Get Solana token mint address from symbol."""
+    mint_str = SOLANA_TOKEN_MINTS.get(token_symbol.upper())
+    if mint_str:
+        return Pubkey.from_string(mint_str)
+    return None
+
+# --- RANGE COMPLIANCE ---
+def check_range_compliance(address: str) -> tuple[bool, str]:
+    """Check if address passes Range compliance screening."""
+    if not RANGE_API_KEY or not RANGE_API_URL:
+        print("   ⚠️ [Executor] Range API not configured, skipping compliance check")
+        return True, "Compliance check skipped"
+
+    try:
+        response = requests.post(
+            f"{RANGE_API_URL}/screen",
+            json={"address": address, "chain": "solana"},
+            headers={"Authorization": f"Bearer {RANGE_API_KEY}"},
+            timeout=10
+        )
+        result = response.json()
+
+        if result.get("allowed", True):
+            return True, "Address cleared"
+        else:
+            return False, result.get("reason", "Address blocked by compliance")
+    except Exception as e:
+        print(f"   ⚠️ [Executor] Range API error: {e}, allowing by default")
+        return True, "Compliance check failed, allowing by default"
+
+# --- JUPITER SWAP ---
+def get_jupiter_quote(input_mint: str, output_mint: str, amount: int, slippage_bps: int = 50):
+    """Get swap quote from Jupiter aggregator (new v1 API)."""
+    try:
+        response = requests.get(
+            f"{JUPITER_API_URL}/quote",
+            params={
+                "inputMint": input_mint,
+                "outputMint": output_mint,
+                "amount": str(amount),
+                "slippageBps": slippage_bps,
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"   ❌ [Executor] Jupiter quote error: {e}")
+        return None
+
+def get_jupiter_swap_transaction(quote: dict, user_pubkey: str):
+    """Get serialized swap transaction from Jupiter (new v1 API)."""
+    try:
+        response = requests.post(
+            f"{JUPITER_API_URL}/swap",
+            json={
+                "quoteResponse": quote,
+                "userPublicKey": user_pubkey,
+                "wrapAndUnwrapSol": True,
+                "dynamicComputeUnitLimit": True,
+                "prioritizationFeeLamports": "auto",
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"   ❌ [Executor] Jupiter swap error: {e}")
+        return None
+
+# --- MAIN EXECUTION ---
 def execute_trade(strategy, current_price):
+    """Execute a strategy trade: direct transfer or Jupiter swap."""
     print("\n" + "="*60)
     print(f"✅ EXECUTION: Trigger met for strategy '{strategy['id']}'")
 
-    # 1. Validation Checks
-    missing_vars = []
-    if not SEPOLIA_RPC_URL: missing_vars.append("SEPOLIA_RPC_URL")
-    if not ENTRYPOINT_CONTRACT_ADDRESS: missing_vars.append("ENTRYPOINT_CONTRACT_ADDRESS")
-    if not EXECUTOR_PRIVATE_KEY: missing_vars.append("EXECUTOR_PRIVATE_KEY")
-    if not CONTRACT_ABI: missing_vars.append("ABI (Check ABI_PATH)")
-
-    if missing_vars:
-        print(f"   ❌ [Executor] CRITICAL ERROR: Missing config: {', '.join(missing_vars)}")
-        return
+    # 1. Validation
+    if not SOLANA_RPC_URL or not EXECUTOR_PRIVATE_KEY:
+        print("   ❌ [Executor] Missing SOLANA_RPC_URL or EXECUTOR_PRIVATE_KEY")
+        return False
 
     try:
-        # 2. Connect to Blockchain
-        w3 = Web3(Web3.HTTPProvider(SEPOLIA_RPC_URL))
-        # Inject PoA middleware for Sepolia/testnets
-        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        client = Client(SOLANA_RPC_URL)
+        executor_keypair = get_executor_keypair()
 
-        if not w3.is_connected():
-            print("   ❌ [Executor] Could not connect to RPC.")
-            return
+        if not executor_keypair:
+            print("   ❌ [Executor] Failed to load executor keypair")
+            return False
 
-        executor_account = w3.eth.account.from_key(EXECUTOR_PRIVATE_KEY)
-        entrypoint_contract = w3.eth.contract(address=ENTRYPOINT_CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+        print(f"   [Executor] Executor: {executor_keypair.pubkey()}")
 
-        # 3. Parse ZK Data
-        try:
-            zk_payload = json.loads(strategy['zkp_data'])
-            inputs = zk_payload.get('publicInputs', {})
+        # 2. Parse Strategy
+        asset_in = strategy.get('asset_in', 'SOL').upper()
+        asset_out = strategy.get('asset_out', 'USDC').upper()
+        raw_amount = strategy.get('amount', 0)
+        recipient_address = strategy.get('recipient_address')
 
-            raw_proof = zk_payload.get('proof', [])
-            proof_array = format_proof_to_uint_array(raw_proof)
+        amount = amount_to_lamports(raw_amount, asset_in)
 
-            zk_proof_struct = {
-                "stateRoot": safe_int(inputs.get('root')),
-                "nullifier": safe_int(inputs.get('nullifier')),
-                "newCommitment": safe_int(inputs.get('newCommitment')),
-                "proof": proof_array
-            }
+        if not recipient_address:
+            print("   ❌ [Executor] Missing recipient_address")
+            return False
 
-            _amountIn = safe_int(inputs.get('amount'))
+        if amount <= 0:
+            print(f"   ❌ [Executor] Invalid amount: {raw_amount}")
+            return False
 
-            raw_asset_in = inputs.get('asset', '')
-            if raw_asset_in in TOKEN_ADDRESSES:
-                _srcToken = TOKEN_ADDRESSES[raw_asset_in]
-            elif w3.is_address(raw_asset_in):
-                _srcToken = Web3.to_checksum_address(raw_asset_in)
-            else:
-                print(f"   ❌ [Executor] Invalid asset_in: '{raw_asset_in}'")
-                return
+        print(f"   [Executor] Amount: {raw_amount} {asset_in} = {amount} smallest units")
+        print(f"   [Executor] Recipient: {recipient_address}")
 
-        except Exception as e:
-            print(f"   ❌ [Executor] Failed to parse zkp_data: {e}")
-            return
+        # 3. Compliance Check
+        allowed, reason = check_range_compliance(recipient_address)
+        if not allowed:
+            print(f"   ❌ [Executor] Compliance failed: {reason}")
+            return False
+        print(f"   ✅ [Executor] Compliance: {reason}")
 
-        # 4. BUILD TRANSACTION PARAMS
-        raw_asset_out = strategy.get('asset_out', 'ETH')
-        if raw_asset_out in TOKEN_ADDRESSES:
-            _dstToken = TOKEN_ADDRESSES[raw_asset_out]
-        elif w3.is_address(raw_asset_out):
-            _dstToken = Web3.to_checksum_address(raw_asset_out)
+        # 4. Execute based on whether swap is needed
+        if asset_in == asset_out:
+            # Direct transfer (no swap needed)
+            return execute_direct_transfer(client, executor_keypair, recipient_address, amount, asset_in)
         else:
-            print(f"   ❌ [Executor] Invalid asset_out: '{raw_asset_out}'")
-            return
-
-        # Use Pool Address from Strategy or Fallback
-        _pool = strategy.get('pool_address')
-        if not _pool or not w3.is_address(_pool):
-            # Fallback WETH/USDC Pool on Sepolia (Example)
-            _pool = Web3.to_checksum_address("0x3289680dD4d6C10bb19b899729cda5eEF58AEfF1")
-            print(f"   ⚠️ [Executor] Missing strategy pool_address. Using Fallback: {_pool}")
-        else:
-            _pool = Web3.to_checksum_address(_pool)
-
-
-        _recipient = Web3.to_checksum_address(strategy['recipient_address'])
-        _minAmountOut = 0
-        _fee = 500  # 0.05% fee tier
-
-        print(f"   [Executor] Building transaction for Entrypoint...")
-        print(f"     -> Amount In: {_amountIn}")
-        print(f"     -> Asset Path: {_srcToken} -> {_dstToken}")
-
-        # 5. Build & Send (EIP-1559 Compatible)
-        tx_func = entrypoint_contract.functions.swap(
-            _pool,
-            _srcToken,
-            _dstToken,
-            _recipient,
-            _amountIn,
-            _minAmountOut,
-            _fee,
-            zk_proof_struct
-        )
-
-        # Estimate gas to prevent under-gassing failures
-        try:
-            estimated_gas = tx_func.estimate_gas({'from': executor_account.address})
-            gas_limit = int(estimated_gas * 1.2) # Add 20% buffer
-        except Exception as gas_err:
-            print(f"   ⚠️ Gas estimation failed ({gas_err}), using default.")
-            gas_limit = 3000000
-
-        tx = tx_func.build_transaction({
-            'from': executor_account.address,
-            'nonce': w3.eth.get_transaction_count(executor_account.address),
-            'gas': gas_limit,
-            'maxFeePerGas': w3.to_wei('50', 'gwei'),
-            'maxPriorityFeePerGas': w3.to_wei('2', 'gwei'),
-            'chainId': 11155111 # Sepolia
-        })
-
-        signed_tx = w3.eth.account.sign_transaction(tx, private_key=EXECUTOR_PRIVATE_KEY)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        
-        print(f"   ✅ Transaction sent! Hash: {tx_hash.hex()}")
-        print(f"   🔗 https://sepolia.etherscan.io/tx/{tx_hash.hex()}")
-        print("="*60)
+            # For devnet: mock swap using mainnet rates + USD Dev token
+            if SOLANA_NETWORK != "mainnet-beta":
+                return execute_mock_swap(client, executor_keypair, recipient_address, amount, asset_in, asset_out)
+            # Jupiter swap then transfer (mainnet only)
+            return execute_swap_and_transfer(client, executor_keypair, recipient_address, amount, asset_in, asset_out)
 
     except Exception as e:
-        print(f"   ❌ [Executor] On-chain error: {e}")
+        print(f"   ❌ [Executor] Error: {e}")
         import traceback
         traceback.print_exc()
+        return False
+
+
+def execute_direct_transfer(client, executor_keypair, recipient_address, amount, asset):
+    """Execute a direct SOL or SPL transfer."""
+    print(f"   [Executor] Direct transfer: {amount} {asset}")
+
+    recipient_pubkey = Pubkey.from_string(recipient_address)
+
+    if asset == 'SOL':
+        from solders.system_program import transfer, TransferParams
+
+        transfer_ix = transfer(
+            TransferParams(
+                from_pubkey=executor_keypair.pubkey(),
+                to_pubkey=recipient_pubkey,
+                lamports=amount
+            )
+        )
+
+        recent_blockhash = client.get_latest_blockhash().value.blockhash
+
+        tx = Transaction(
+            recent_blockhash=recent_blockhash,
+            fee_payer=executor_keypair.pubkey()
+        )
+        tx.add(transfer_ix)
+        tx.sign(executor_keypair)
+
+        tx_sig = client.send_transaction(
+            tx,
+            executor_keypair,
+            opts={"skip_preflight": False, "preflight_commitment": Confirmed}
+        )
+
+        if tx_sig.value:
+            print(f"   ✅ Transfer successful! Sig: {tx_sig.value}")
+            print(f"   🔗 https://explorer.solana.com/tx/{tx_sig.value}?cluster=devnet")
+            print("="*60)
+            return True
+        else:
+            print(f"   ❌ Transfer failed: {tx_sig}")
+            return False
+    else:
+        # SPL token transfer - TODO: implement
+        print(f"   ❌ SPL transfers not yet implemented for {asset}")
+        return False
+
+
+def execute_mock_swap(client, executor_keypair, recipient_address, amount, asset_in, asset_out):
+    """Mock swap for devnet: get mainnet quote, send USD Dev tokens at that rate."""
+    in_decimals = TOKEN_DECIMALS.get(asset_in.upper(), 9)
+    human_amount_in = amount / (10 ** in_decimals)
+    print(f"   [Executor] Mock Swap (devnet): {human_amount_in} {asset_in} -> {asset_out}")
+
+    # Get mainnet quote using mainnet token mints
+    mainnet_input_mint = MAINNET_TOKEN_MINTS.get(asset_in)
+    mainnet_output_mint = MAINNET_TOKEN_MINTS.get(asset_out)
+
+    if not mainnet_input_mint or not mainnet_output_mint:
+        print(f"   ❌ Unknown token for mainnet quote: {asset_in} or {asset_out}")
+        return False
+
+    # Get quote from Jupiter using mainnet mints
+    quote = get_jupiter_quote(mainnet_input_mint, mainnet_output_mint, amount)
+    if not quote:
+        print("   ❌ Failed to get Jupiter quote for conversion rate")
+        return False
+
+    out_amount = int(quote.get('outAmount', 0))
+    out_decimals = TOKEN_DECIMALS.get(asset_out.upper(), 6)
+    usdc_amount_out = out_amount / (10 ** out_decimals)
+    print(f"   [Executor] Mainnet rate: {human_amount_in} {asset_in} -> {usdc_amount_out:.2f} {asset_out}")
+
+    # Send USD Dev tokens at the quoted rate
+    print(f"   [Executor] Sending {usdc_amount_out:.2f} USD Dev tokens to {recipient_address}")
+    return execute_spl_transfer(client, executor_keypair, recipient_address, out_amount, USD_DEV_MINT)
+
+
+def execute_spl_transfer(client, executor_keypair, recipient_address, amount, mint_address):
+    """Execute SPL token transfer."""
+    from spl.token.instructions import transfer_checked, TransferCheckedParams
+    from spl.token.constants import TOKEN_PROGRAM_ID
+    from solders.pubkey import Pubkey
+
+    mint_pubkey = Pubkey.from_string(mint_address)
+    recipient_pubkey = Pubkey.from_string(recipient_address)
+
+    # Get or create associated token accounts
+    from spl.token.instructions import get_associated_token_address
+
+    sender_ata = get_associated_token_address(executor_keypair.pubkey(), mint_pubkey)
+    recipient_ata = get_associated_token_address(recipient_pubkey, mint_pubkey)
+
+    # Check if recipient ATA exists, create if not
+    recipient_ata_info = client.get_account_info(recipient_ata)
+
+    instructions = []
+
+    if recipient_ata_info.value is None:
+        # Create recipient ATA
+        from spl.token.instructions import create_associated_token_account
+
+        create_ata_ix = create_associated_token_account(
+            payer=executor_keypair.pubkey(),
+            owner=recipient_pubkey,
+            mint=mint_pubkey
+        )
+        instructions.append(create_ata_ix)
+        print(f"   [Executor] Creating recipient ATA: {recipient_ata}")
+
+    # Transfer tokens (USD Dev has 6 decimals)
+    transfer_ix = transfer_checked(
+        TransferCheckedParams(
+            program_id=TOKEN_PROGRAM_ID,
+            source=sender_ata,
+            mint=mint_pubkey,
+            dest=recipient_ata,
+            owner=executor_keypair.pubkey(),
+            amount=amount,
+            decimals=6
+        )
+    )
+    instructions.append(transfer_ix)
+
+    # Build and send transaction
+    recent_blockhash = client.get_latest_blockhash().value.blockhash
+
+    tx = Transaction(
+        recent_blockhash=recent_blockhash,
+        fee_payer=executor_keypair.pubkey()
+    )
+    for ix in instructions:
+        tx.add(ix)
+    tx.sign(executor_keypair)
+
+    from solana.rpc.types import TxOpts
+
+    tx_sig = client.send_transaction(
+        tx,
+        executor_keypair,
+        opts=TxOpts(skip_preflight=False, preflight_commitment=Confirmed)
+    )
+
+    if tx_sig.value:
+        print(f"   ✅ SPL Transfer successful! Sig: {tx_sig.value}")
+        print(f"   🔗 https://explorer.solana.com/tx/{tx_sig.value}?cluster=devnet")
         print("="*60)
+        return True
+    else:
+        print(f"   ❌ SPL Transfer failed: {tx_sig}")
+        return False
+
+
+def execute_swap_and_transfer(client, executor_keypair, recipient_address, amount, asset_in, asset_out):
+    """Execute Jupiter swap and transfer result to recipient."""
+    print(f"   [Executor] Swap: {amount} {asset_in} -> {asset_out}")
+
+    input_mint = get_token_mint(asset_in)
+    output_mint = get_token_mint(asset_out)
+
+    if not input_mint or not output_mint:
+        print(f"   ❌ Invalid token: {asset_in} or {asset_out}")
+        return False
+
+    # Get Jupiter quote
+    quote = get_jupiter_quote(str(input_mint), str(output_mint), amount)
+    if not quote:
+        print("   ❌ Failed to get Jupiter quote")
+        return False
+
+    out_amount = int(quote.get('outAmount', 0))
+    print(f"   [Executor] Quote: {amount} {asset_in} -> {out_amount} {asset_out}")
+
+    # Get swap transaction
+    swap_response = get_jupiter_swap_transaction(quote, str(executor_keypair.pubkey()))
+    if not swap_response or 'swapTransaction' not in swap_response:
+        print("   ❌ Failed to get swap transaction")
+        return False
+
+    # Execute swap
+    swap_tx_data = base64.b64decode(swap_response['swapTransaction'])
+
+    from solders.transaction import VersionedTransaction
+
+    try:
+        versioned_tx = VersionedTransaction.from_bytes(swap_tx_data)
+        signed_tx = VersionedTransaction(versioned_tx.message, [executor_keypair])
+
+        tx_sig = client.send_transaction(
+            signed_tx,
+            opts={"skip_preflight": False, "preflight_commitment": Confirmed}
+        )
+
+        if tx_sig.value:
+            print(f"   ✅ Swap successful! Sig: {tx_sig.value}")
+            print(f"   🔗 https://explorer.solana.com/tx/{tx_sig.value}?cluster=devnet")
+            print("="*60)
+            return True
+        else:
+            print(f"   ❌ Swap failed: {tx_sig}")
+            return False
+
+    except Exception as e:
+        print(f"   ❌ Swap error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def execute_private_withdrawal(strategy, current_price):
+    """Execute a private withdrawal - same as execute_trade for now.
+
+    In production, this would first withdraw from ZK pool, then execute swap.
+    For hackathon demo, we execute directly from executor wallet.
+    """
+    print("\n" + "="*60)
+    print(f"✅ PRIVATE EXECUTION: Strategy '{strategy['id']}'")
+
+    # For hackathon: execute directly (ZK pool integration is separate)
+    # The privacy is handled by the FHE-encrypted strategy conditions
+    return execute_trade(strategy, current_price)
+
+
+# For testing
+if __name__ == "__main__":
+    test_strategy = {
+        'id': 'test-001',
+        'asset_in': 'SOL',
+        'asset_out': 'USDC',
+        'amount': 0.01,  # 0.01 SOL
+        'recipient_address': 'YourTestWalletAddress',
+    }
+
+    print("Testing Solana trade executor...")
+    execute_trade(test_strategy, 100.0)

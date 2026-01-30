@@ -1,0 +1,21 @@
+{
+  "name": "noir-zk-service",
+  "version": "1.0.0",
+  "description": "Noir ZK backend service for Siphon Protocol strategy executor",
+  "main": "noir_zk_service.js",
+  "scripts": {
+    "start": "node noir_zk_service.js",
+    "dev": "NODE_ENV=development node noir_zk_service.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.87.0",
+    "dotenv": "^17.2.3",
+    "express": "^4.22.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

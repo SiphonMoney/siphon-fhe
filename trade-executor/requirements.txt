@@ -1,8 +1,16 @@
+# Flask and extensions
 Flask==3.0.0
 Flask-Cors==4.0.0
 gunicorn==21.2.0
 python-dotenv==1.0.0
 requests==2.31.0
 Flask-SQLAlchemy==3.1.1
-web3==6.15.1
+
+# Solana SDK (replacing web3.py)
+solana==0.34.3
+solders==0.21.0
+anchorpy==0.20.1
+
+# Utilities
+base58==2.1.1
 cryptography>=41.0.0
