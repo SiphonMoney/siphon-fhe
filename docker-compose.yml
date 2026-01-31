@@ -1,6 +1,22 @@
 version: '3.8'
 
 services:
+  # 0. Caddy Reverse Proxy (HTTPS)
+  caddy:
+    image: caddy:2-alpine
+    container_name: siphon-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - trade-executor
+      - payload-generator
+    restart: unless-stopped
+
   # 1. Python Trade Executor (The Manager)
   trade-executor:
     build: ./trade-executor
@@ -45,4 +61,8 @@ services:
 
 volumes:
   trade-executor-data:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
     driver: local

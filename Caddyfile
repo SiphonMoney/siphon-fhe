@@ -1,0 +1,24 @@
+# Replace 'api.yourdomain.com' with your actual domain
+# Or use the EC2 public IP for testing (won't get HTTPS without domain)
+
+api.yourdomain.com {
+    # Payload Generator
+    handle /generatePayload* {
+        reverse_proxy payload-generator:5009
+    }
+    
+    # Trade Executor
+    handle /createStrategy* {
+        reverse_proxy trade-executor:5005
+    }
+    handle /health* {
+        reverse_proxy trade-executor:5005
+    }
+    
+    # CORS headers for Vercel frontend
+    header {
+        Access-Control-Allow-Origin *
+        Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        Access-Control-Allow-Headers "Content-Type, X-API-TOKEN"
+    }
+}
