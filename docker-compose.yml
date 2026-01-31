@@ -26,7 +26,7 @@ services:
     environment:
       - FHE_ENGINE_URL=http://fhe-engine:5001/evaluateStrategy
       - PYTH_HERMES_URL=https://hermes.pyth.network
-      - DATABASE_URI=sqlite:///data/strategies.db?timeout=30
+      - DATABASE_URI=sqlite:////app/data/strategies.db
       - HELIUS_API_KEY=${HELIUS_API_KEY}
       - SOLANA_NETWORK=${SOLANA_NETWORK:-devnet}
       - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
