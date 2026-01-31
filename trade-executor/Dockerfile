@@ -21,8 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Make entrypoint script executable and set ownership
-RUN chmod +x entrypoint.sh && chown -R siphon:siphon /app
+# Create data directory and make entrypoint script executable
+RUN mkdir -p /app/data && chmod +x entrypoint.sh && chown -R siphon:siphon /app
 
 # Switch to non-root user
 USER siphon
