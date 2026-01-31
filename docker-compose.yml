@@ -1,138 +1,48 @@
 version: '3.8'
 
-# Production Docker Compose for AWS Deployment
-# Use: docker-compose -f docker-compose.prod.yml up -d
-
 services:
   # 1. Python Trade Executor (The Manager)
   trade-executor:
     build: ./trade-executor
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/siphon-trade-executor:${VERSION:-latest}
     container_name: siphon-trade-executor
     ports:
       - "5005:5005"
     environment:
-      # Connect to FHE Engine (service name 'fhe-engine' acts as hostname)
       - FHE_ENGINE_URL=http://fhe-engine:5001/evaluateStrategy
-      - FHE_ENGINE_BRACKET_URL=http://fhe-engine:5001/evaluate_bracket_order
-      - FHE_ENGINE_LIMIT_BUY_URL=http://fhe-engine:5001/evaluate_limit_buy
-      - FHE_ENGINE_LIMIT_SELL_URL=http://fhe-engine:5001/evaluate_limit_sell
-
-      # External Services
       - PYTH_HERMES_URL=https://hermes.pyth.network
-      - ARKIV_RPC_URL=${ARKIV_RPC_URL}
-
-      # Solana RPC
-      - SOLANA_RPC_URL=${SOLANA_RPC_URL}
-
-      # Database
       - DATABASE_URI=sqlite:///data/strategies.db?timeout=30
-
-      # Auth (must match across services)
-      - API_TOKEN=${API_TOKEN}
-
-      # Secrets
-      - SYPHON_VAULT_CONTRACT_ADDRESS=${SYPHON_VAULT_CONTRACT_ADDRESS}
+      - HELIUS_API_KEY=${HELIUS_API_KEY}
+      - SOLANA_NETWORK=${SOLANA_NETWORK:-devnet}
       - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
-
     volumes:
-      # Persist database
       - trade-executor-data:/app/data
     depends_on:
-      fhe-engine:
-        condition: service_healthy
+      - fhe-engine
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 2G
-        reservations:
-          cpus: '1'
-          memory: 1G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "100m"
-        max-file: "5"
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:5005/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
 
   # 2. Rust FHE Engine (The Calculator)
   fhe-engine:
     build: ./fhe
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/siphon-fhe-engine:${VERSION:-latest}
     container_name: syphon-fhe-engine
     ports:
       - "5001:5001"
     environment:
       - RUST_LOG=info
-      - API_TOKEN=${API_TOKEN}
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
-        reservations:
-          cpus: '2'
-          memory: 4G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "100m"
-        max-file: "5"
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:5001/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
   # 3. Rust Payload Generator (The Encryptor)
   payload-generator:
     build: ./siphon-payload-generator-demo
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/siphon-payload-generator:${VERSION:-latest}
     container_name: siphon-payload-generator
     ports:
       - "5009:5009"
     environment:
       - RUST_LOG=info
       - ORCHESTRATOR_URL=http://trade-executor:5005/createStrategy
-      - API_TOKEN=${API_TOKEN}
     depends_on:
-      trade-executor:
-        condition: service_healthy
+      - trade-executor
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
-        reservations:
-          cpus: '2'
-          memory: 4G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "100m"
-        max-file: "5"
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:5009/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
 volumes:
   trade-executor-data:
     driver: local
-
-networks:
-  default:
-    name: siphon-network
-    driver: bridge
