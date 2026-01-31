@@ -1,4 +1,4 @@
-# Siphon Payload Generator (`siphon-payload-generator-demo`)
+# Siphon Payload Generator
 
 The **Payload Generator** is a local Rust service that:
 
@@ -12,27 +12,30 @@ It exists to keep heavy cryptography out of the browser, while ensuring plaintex
 
 ## API
 
-- **`POST /generatePayload`**: `http://localhost:5009/generatePayload`
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/generatePayload` | POST | Generate encrypted payload from plaintext strategy |
+| `/health` | GET | Health check |
+
+Default port: `5009`
 
 ---
 
 ## Configuration
 
-Copy the template and edit the values:
+Environment variables (optional):
 
 ```bash
-cp env.template .env
+# Where to forward the encrypted payload (defaults to localhost)
+ORCHESTRATOR_URL="http://localhost:5005/createStrategy"
 ```
-
-- **`API_TOKEN` (required)**: must match the Trade Executor `API_TOKEN`
-- **`ORCHESTRATOR_URL` (recommended)**: defaults to `http://localhost:5005/createStrategy`
-- **`MPC_SERVER_1_URL`, `MPC_SERVER_2_URL` (optional)**: enable MPC key-share storage if your MPC servers are running
 
 ---
 
 ## Run (local)
 
 ```bash
+cd strategies-executor/siphon-payload-generator-demo
 cargo run --release
 ```
 
@@ -48,6 +51,5 @@ From `strategies-executor/`:
 docker compose up --build
 ```
 
-In Docker, the orchestrator URL must be the service name:
-- `ORCHESTRATOR_URL=http://trade-executor:5005/createStrategy` (set in `../docker-compose.yml`)
-
+In Docker, the orchestrator URL uses the service name:
+- `ORCHESTRATOR_URL=http://trade-executor:5005/createStrategy` (set in `docker-compose.yml`)

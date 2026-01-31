@@ -6,44 +6,39 @@ This folder contains the **off-chain services** that power encrypted strategy cr
 - **Trade Executor** (`trade-executor`, Python/Flask): stores encrypted strategies, polls the oracle, orchestrates evaluation, and triggers on-chain execution.
 - **FHE Engine** (`fhe`, Rust/Axum + tfhe-rs): performs homomorphic comparisons and returns whether a strategy is triggered.
 
-Optional (external to this repo): **MPC servers** can hold key shares for threshold decryption.
-
 ---
 
-## Architecture (How it works)
+## Architecture
 
 ### Components & ports (local defaults)
 
-- **Frontend (Next.js)**: `http://localhost:3000` (in repo root, outside this folder)
-- **Payload Generator**: `http://localhost:5009`
-  - `POST /generatePayload`
-- **Trade Executor**: `http://localhost:5005`
-  - `POST /createStrategy`
-  - `GET /health`
-- **FHE Engine**: `http://localhost:5001`
-  - `POST /evaluateStrategy`
+| Service | Port | Endpoint |
+|---------|------|----------|
+| Payload Generator | 5009 | `POST /generatePayload`, `GET /health` |
+| Trade Executor | 5005 | `POST /createStrategy`, `GET /health` |
+| FHE Engine | 5001 | `POST /evaluateStrategy`, `GET /health` |
 
 ### Data flow
 
 1. **User enters plaintext** strategy parameters in the frontend (upper/lower bounds, amounts, recipient, ZK payload).
 2. Frontend calls **Payload Generator** (`/generatePayload`).
 3. Payload Generator:
-   - Generates FHE keys (optionally using MPC servers for distributed key storage).
+   - Generates FHE keys.
    - Encrypts bounds and constructs an **encrypted payload**.
-   - Forwards the encrypted payload to **Trade Executor** (`/createStrategy`), including `X-API-TOKEN`.
+   - Forwards the encrypted payload to **Trade Executor** (`/createStrategy`).
 4. Trade Executor:
    - Persists the strategy (encrypted fields stored in SQLite).
    - A background **scheduler** periodically fetches prices from Pyth Hermes.
    - For each pending strategy, calls **FHE Engine** (`/evaluateStrategy`) with ciphertext + current price.
 5. FHE Engine:
    - Runs the homomorphic comparison.
-   - Decrypts the comparison result (MPC threshold decryption if `fhe_key_id` is present; legacy direct decryption if `encrypted_client_key` is present).
+   - Decrypts the comparison result.
    - Returns `{ "is_triggered": true|false }`.
-6. If triggered, Trade Executor performs the **on-chain execution** (requires RPC URL, contract address, executor key, ABI).
+6. If triggered, Trade Executor performs the **on-chain execution** on Solana.
 
 ---
 
-## Quick start (recommended): Docker Compose
+## Quick start: Docker Compose
 
 From `strategies-executor/`:
 
@@ -51,48 +46,28 @@ From `strategies-executor/`:
 docker compose up --build
 ```
 
-This starts:
-- `trade-executor` on `:5005`
-- `fhe-engine` on `:5001`
-- `payload-generator` on `:5009`
+This starts all three services with the correct networking.
 
-### Required environment variables
+---
 
-Docker Compose reads variables from your shell (or a `.env` file in the same folder as `docker-compose.yml`).
+## Environment Variables
 
-Minimum to run end-to-end:
+Create a `.env` file in `strategies-executor/` or `trade-executor/`:
 
 ```bash
-# Auth (must match across services)
-API_TOKEN="change-me"
+# Database
+DATABASE_URI="sqlite:///instance/strategies.db?timeout=30"
 
-# Trade Executor database
-DATABASE_URI="sqlite:///strategies.db?timeout=30"
-
-# FHE Engine endpoint used by Trade Executor
+# FHE Engine (Docker uses service names)
 FHE_ENGINE_URL="http://fhe-engine:5001/evaluateStrategy"
-```
 
-Optional (only needed for on-chain execution after a trigger):
+# Solana RPC
+HELIUS_API_KEY="your_helius_key"
+# OR: SOLANA_RPC_URL="https://api.devnet.solana.com"
+SOLANA_NETWORK="devnet"
 
-```bash
-SEPOLIA_RPC_URL="..."
-ENTRYPOINT_CONTRACT_ADDRESS="0x..."
-EXECUTOR_PRIVATE_KEY="0x..."
-ABI_PATH="Entrypoint.abi.json"
-```
-
-Optional (only needed for MPC mode):
-
-```bash
-MPC_SERVER_1_URL="http://localhost:8001"
-MPC_SERVER_2_URL="http://localhost:8002"
-```
-
-### Health checks
-
-```bash
-curl http://localhost:5005/health
+# Executor wallet (for on-chain transactions)
+EXECUTOR_PRIVATE_KEY="your_base58_private_key"
 ```
 
 ---
@@ -106,40 +81,39 @@ cd strategies-executor/fhe
 cargo run --release
 ```
 
-Listens on: `http://localhost:5001/evaluateStrategy`
+Listens on: `http://localhost:5001`
 
 ### 2) Start Trade Executor (Python)
 
 ```bash
 cd strategies-executor/trade-executor
+pip install -r requirements.txt
 python init_db.py
 gunicorn --bind 0.0.0.0:5005 --workers 1 --timeout 3000 "app:app"
-```
-
-Requires at least:
-
-```bash
-export DATABASE_URI="sqlite:///strategies.db?timeout=20000"
-export FHE_ENGINE_URL="http://localhost:5001/evaluateStrategy"
-export API_TOKEN="change-me"
 ```
 
 ### 3) Start Payload Generator (Rust)
 
 ```bash
 cd strategies-executor/siphon-payload-generator-demo
-cp env.template .env
-# edit .env to set API_TOKEN (and optionally ORCHESTRATOR_URL / MPC URLs)
 cargo run --release
 ```
 
-Listens on: `http://localhost:5009/generatePayload`
+Listens on: `http://localhost:5009`
+
+---
+
+## Health checks
+
+```bash
+curl http://localhost:5005/health
+curl http://localhost:5001/health
+curl http://localhost:5009/health
+```
 
 ---
 
 ## Common pitfalls
 
-- **Trade Executor can’t reach the FHE Engine**: set `FHE_ENGINE_URL` (Docker: `http://fhe-engine:5001/evaluateStrategy`, local: `http://localhost:5001/evaluateStrategy`).
-- **401 Unauthorized**: ensure the same `API_TOKEN` is configured for **Trade Executor**, **Payload Generator**, and **FHE Engine**.
-- **On-chain execution doesn’t happen**: you still need `SEPOLIA_RPC_URL`, `ENTRYPOINT_CONTRACT_ADDRESS`, and `EXECUTOR_PRIVATE_KEY` for actual swaps after a trigger.
-
+- **Trade Executor can't reach the FHE Engine**: set `FHE_ENGINE_URL` (Docker: `http://fhe-engine:5001/evaluateStrategy`, local: `http://localhost:5001/evaluateStrategy`).
+- **On-chain execution doesn't happen**: you need `HELIUS_API_KEY` (or `SOLANA_RPC_URL`) and `EXECUTOR_PRIVATE_KEY` for actual transactions.

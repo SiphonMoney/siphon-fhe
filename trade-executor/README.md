@@ -5,7 +5,7 @@ The **Trade Executor** is the Python backend that:
 - receives **encrypted** strategies from the Payload Generator (`POST /createStrategy`)
 - stores strategies in **SQLite** (encrypted/compressed fields handled in the model layer)
 - runs a background **scheduler** that fetches live prices and evaluates pending strategies via the Rust **FHE Engine**
-- when a strategy triggers, optionally performs **on-chain execution** (requires RPC + contract config)
+- when a strategy triggers, performs **on-chain execution** via Solana
 
 For the full multi-service architecture, see `../README.md`.
 
@@ -13,8 +13,8 @@ For the full multi-service architecture, see `../README.md`.
 
 ## Service API
 
-- `GET /health` (no auth)
-- `POST /createStrategy` (requires `X-API-TOKEN`)
+- `GET /health`
+- `POST /createStrategy`
 
 Default port: `5005`
 
@@ -51,19 +51,20 @@ python init_db.py
 gunicorn --bind 0.0.0.0:5005 --workers 1 --timeout 3000 "app:app"
 ```
 
-Minimum environment:
+Minimum environment (`.env` file):
 
 ```bash
-export DATABASE_URI="sqlite:///strategies.db?timeout=20000"
-export FHE_ENGINE_URL="http://localhost:5001/evaluateStrategy"
-export API_TOKEN="change-me"
+DATABASE_URI="sqlite:///instance/strategies.db?timeout=20000"
+FHE_ENGINE_URL="http://localhost:5001/evaluateStrategy"
+SOLANA_NETWORK="devnet"
+HELIUS_API_KEY="your_helius_key"
+EXECUTOR_PRIVATE_KEY="your_base58_private_key"
 ```
 
 ### 2) FHE Engine (Rust)
 
 ```bash
 cd strategies-executor/fhe
-export API_TOKEN="change-me"
 cargo run --release
 ```
 
@@ -71,25 +72,21 @@ cargo run --release
 
 ```bash
 cd strategies-executor/siphon-payload-generator-demo
-cp env.template .env
-# set API_TOKEN=change-me (and optionally ORCHESTRATOR_URL / MPC URLs)
 cargo run --release
 ```
 
 ---
 
-## On-chain execution (optional)
+## On-chain execution
 
-If you want the Trade Executor to actually submit transactions after a trigger, you must configure:
+For the Trade Executor to submit Solana transactions after a trigger, configure:
 
 ```bash
-export SEPOLIA_RPC_URL="..."
-export ENTRYPOINT_CONTRACT_ADDRESS="0x..."
-export EXECUTOR_PRIVATE_KEY="0x..."
-export ABI_PATH="Entrypoint.abi.json"
+HELIUS_API_KEY="your_helius_api_key"
+# OR: SOLANA_RPC_URL="https://api.devnet.solana.com"
+SOLANA_NETWORK="devnet"
+EXECUTOR_PRIVATE_KEY="your_base58_private_key"
 ```
-
-Without these, the service can still accept/store strategies and run evaluations, but trade execution will be skipped/fail when triggered.
 
 ---
 
@@ -98,7 +95,3 @@ Without these, the service can still accept/store strategies and run evaluations
 ```bash
 curl http://localhost:5005/health
 ```
-
-If you see `401 Unauthorized` on `/createStrategy`, make sure:
-- Payload Generator sends `X-API-TOKEN`
-- `API_TOKEN` matches across Trade Executor + Payload Generator + FHE Engine

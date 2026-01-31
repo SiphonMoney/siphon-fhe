@@ -6,7 +6,7 @@ import json
 from database import db, Strategy
 from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
-from auth import require_auth, rate_limit
+from auth import rate_limit
 
 
 app = Flask(__name__)
@@ -41,19 +41,16 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
     scheduler_thread.start()
 
 @app.route('/createStrategy', methods=['POST'])
-@require_auth
-@rate_limit(max_requests=50, window_seconds=60)  # 50 requests per minute
+@rate_limit(max_requests=50, window_seconds=60)
 def create_strategy():
     data = request.json
     if not data: 
         return jsonify({"error": "Invalid JSON"}), 400
 
-
     try:
         strategy_type = data.get("strategy_type", "")
         token_symbol = data.get('asset_in') if "LONG" in strategy_type or "SELL" in strategy_type else data.get('asset_out')
 
-        # Data is automatically compressed and encrypted by the database model
         new_strategy = Strategy(
             user_id=data['user_id'],
             strategy_type=strategy_type,
@@ -63,11 +60,8 @@ def create_strategy():
             recipient_address=data['recipient_address'],
             encrypted_upper_bound=json.dumps(data.get('encrypted_upper_bound')),
             encrypted_lower_bound=json.dumps(data.get('encrypted_lower_bound')),
-            server_key=json.dumps(data.get('server_key')),  # Will be compressed + encrypted
-            encrypted_client_key=json.dumps(data.get('encrypted_client_key')) if data.get('encrypted_client_key') else None,  # Optional - None if using MPC shares
-            mpc_public_key_set=data.get('mpc_public_key_set'),
-            mpc_share_indices=json.dumps(data.get('mpc_share_indices')) if data.get('mpc_share_indices') else None,
-            fhe_key_id=data.get('fhe_key_id'),  # Key ID when shares stored on MPC
+            server_key=json.dumps(data.get('server_key')),
+            encrypted_client_key=json.dumps(data.get('encrypted_client_key')),
             zkp_data=json.dumps(data.get('zkp_data') or data.get('zk_proof')) if (data.get('zkp_data') or data.get('zk_proof')) else None
         )
         
@@ -81,5 +75,4 @@ def create_strategy():
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
 
 if __name__ == '__main__':
-    # Local dev (prefer gunicorn for production-like behavior)
     app.run(port=5005, debug=True)

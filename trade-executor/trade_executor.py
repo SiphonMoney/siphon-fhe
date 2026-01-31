@@ -194,7 +194,7 @@ def execute_trade(strategy, current_price):
         else:
             # For devnet: mock swap using mainnet rates + USD Dev token
             if SOLANA_NETWORK != "mainnet-beta":
-                return execute_mock_swap(client, executor_keypair, recipient_address, amount, asset_in, asset_out)
+                return execute_mock_swap(client, executor_keypair, recipient_address, amount, asset_in, asset_out, current_price)
             # Jupiter swap then transfer (mainnet only)
             return execute_swap_and_transfer(client, executor_keypair, recipient_address, amount, asset_in, asset_out)
 
@@ -251,30 +251,25 @@ def execute_direct_transfer(client, executor_keypair, recipient_address, amount,
         return False
 
 
-def execute_mock_swap(client, executor_keypair, recipient_address, amount, asset_in, asset_out):
-    """Mock swap for devnet: get mainnet quote, send USD Dev tokens at that rate."""
+def execute_mock_swap(client, executor_keypair, recipient_address, amount, asset_in, asset_out, current_price=None):
+    """Mock swap for devnet: use Pyth price for conversion rate, send USD Dev tokens."""
     in_decimals = TOKEN_DECIMALS.get(asset_in.upper(), 9)
     human_amount_in = amount / (10 ** in_decimals)
     print(f"   [Executor] Mock Swap (devnet): {human_amount_in} {asset_in} -> {asset_out}")
 
-    # Get mainnet quote using mainnet token mints
-    mainnet_input_mint = MAINNET_TOKEN_MINTS.get(asset_in)
-    mainnet_output_mint = MAINNET_TOKEN_MINTS.get(asset_out)
-
-    if not mainnet_input_mint or not mainnet_output_mint:
-        print(f"   ❌ Unknown token for mainnet quote: {asset_in} or {asset_out}")
+    # Use Pyth price for conversion (passed from scheduler)
+    if current_price is None or current_price <= 0:
+        print("   ❌ No valid price available for conversion")
         return False
-
-    # Get quote from Jupiter using mainnet mints
-    quote = get_jupiter_quote(mainnet_input_mint, mainnet_output_mint, amount)
-    if not quote:
-        print("   ❌ Failed to get Jupiter quote for conversion rate")
-        return False
-
-    out_amount = int(quote.get('outAmount', 0))
+    
+    # Calculate output amount based on Pyth price
+    # For SOL -> USDC: multiply by current price
     out_decimals = TOKEN_DECIMALS.get(asset_out.upper(), 6)
-    usdc_amount_out = out_amount / (10 ** out_decimals)
-    print(f"   [Executor] Mainnet rate: {human_amount_in} {asset_in} -> {usdc_amount_out:.2f} {asset_out}")
+    usdc_amount_out = human_amount_in * current_price
+    out_amount = int(usdc_amount_out * (10 ** out_decimals))
+    
+    print(f"   [Executor] Pyth price: ${current_price:.2f}")
+    print(f"   [Executor] Conversion: {human_amount_in} {asset_in} -> {usdc_amount_out:.2f} {asset_out}")
 
     # Send USD Dev tokens at the quoted rate
     print(f"   [Executor] Sending {usdc_amount_out:.2f} USD Dev tokens to {recipient_address}")

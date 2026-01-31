@@ -1,14 +1,13 @@
-# FIX 1: Use 'latest' to support new dependencies like rayon-core
+# FHE Engine Dockerfile - Optimized for AWS EC2 (x86_64)
 FROM rust:latest AS builder
 
 WORKDIR /usr/src/app
 
-# FIX 2: Copy Cargo.toml first
+# Copy Cargo.toml first
 COPY Cargo.toml ./
 
-# FIX 3: Use a wildcard copy for Cargo.lock.
+# Use a wildcard copy for Cargo.lock.
 # This command says "Copy Cargo.lock if it exists, otherwise do nothing."
-# It prevents the "file not found" error while still using the lockfile if available.
 COPY Cargo.loc[k] ./
 
 # Create a dummy main.rs to build dependencies (caching layer)
@@ -19,8 +18,9 @@ RUN rm -rf src
 # Now copy the actual source code
 COPY . .
 
-# Enable native CPU features for TFHE performance
-ENV RUSTFLAGS="-C target-cpu=native"
+# Target x86-64-v3 for AWS EC2 instances (supports AVX2)
+# This ensures compatibility with c5/c6i/m5/m6i instance types
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 RUN cargo build --release
 
 # --- Runtime Stage ---
@@ -28,14 +28,30 @@ FROM debian:bookworm-slim
 
 WORKDIR /usr/local/bin
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+# Install runtime dependencies and curl for health checks
+RUN apt-get update && apt-get install -y \
+    libssl-dev \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd -r siphon && useradd -r -g siphon siphon
 
 # Copy the binary from the builder stage
-# IMPORTANT: Replace 'syphon_fhe_rust' with the actual name from your Cargo.toml!
 COPY --from=builder /usr/src/app/target/release/syphon_fhe_rust .
 
+# Set ownership
+RUN chown siphon:siphon syphon_fhe_rust
+
+# Switch to non-root user
+USER siphon
+
 EXPOSE 5001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:5001/health || exit 1
 
 # Run the binary
 CMD ["./syphon_fhe_rust"]

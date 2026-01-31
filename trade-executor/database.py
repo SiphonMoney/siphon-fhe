@@ -6,7 +6,6 @@ import uuid
 import json
 from encryption import db_encryption, data_compression
 
-# ✅ Initialize db first
 db = SQLAlchemy()
 
 class CompressedEncryptedText(TypeDecorator):
@@ -19,9 +18,7 @@ class CompressedEncryptedText(TypeDecorator):
         if value is None:
             return None
         if isinstance(value, str):
-            # Compress first (better for large data)
             compressed = data_compression.compress_to_base64(value)
-            # Then encrypt
             encrypted = db_encryption.encrypt(compressed)
             return encrypted.encode()
         return value
@@ -32,12 +29,9 @@ class CompressedEncryptedText(TypeDecorator):
             return None
         if isinstance(value, bytes):
             try:
-                # Decrypt first
                 decrypted = db_encryption.decrypt(value.decode())
-                # Then decompress
                 return data_compression.decompress_from_base64(decrypted)
             except Exception as e:
-                # Fallback for migration compatibility
                 print(f"⚠️  Error processing value: {e}")
                 return value.decode() if isinstance(value, bytes) else value
         return value
@@ -68,7 +62,7 @@ class CompressedText(TypeDecorator):
 
 class Strategy(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = db.Column(db.String, nullable=False, index=True)  # Index for faster queries
+    user_id = db.Column(db.String, nullable=False, index=True)
     strategy_type = db.Column(db.String, nullable=False, index=True)
     asset_in = db.Column(db.String, nullable=False)
     asset_out = db.Column(db.String, nullable=False)
@@ -77,9 +71,8 @@ class Strategy(db.Model):
     recipient_address = db.Column(db.String, nullable=False)
     
     # Compressed and encrypted sensitive fields (FHE keys)
-    # These are the largest fields - compression + encryption reduces size significantly
     server_key = db.Column(CompressedEncryptedText, nullable=False)
-    encrypted_client_key = db.Column(CompressedEncryptedText, nullable=True)  # Nullable when using MPC shares
+    encrypted_client_key = db.Column(CompressedEncryptedText, nullable=False)  # Required for decryption
     
     # Compressed but not encrypted (FHE ciphertexts - already encrypted by FHE)
     encrypted_upper_bound = db.Column(CompressedText, nullable=False)
@@ -87,18 +80,15 @@ class Strategy(db.Model):
     
     # Compressed JSON fields
     zkp_data = db.Column(CompressedText, nullable=True)
-    mpc_share_indices = db.Column(CompressedText, nullable=True)
     
-    # Small fields - no compression needed
-    mpc_public_key_set = db.Column(db.Text, nullable=True)  # MPC public key set (smaller, hash-based)
-    fhe_key_id = db.Column(db.String, nullable=True, index=True)  # Key ID when shares stored on MPC (no full key stored)
+    # Status
     status = db.Column(db.String, default='PENDING', nullable=False, index=True)
 
     # ZK Privacy Pool Integration
-    utxo_commitments = db.Column(db.Text, nullable=True)  # JSON array of UTXO commitment strings
-    is_private = db.Column(db.Boolean, default=True, nullable=False, index=True)  # Whether to use ZK pool
+    utxo_commitments = db.Column(db.Text, nullable=True)
+    is_private = db.Column(db.Boolean, default=True, nullable=False, index=True)
 
-    # Timestamps for cleanup
+    # Timestamps
     created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -114,16 +104,13 @@ class Strategy(db.Model):
             'price_feed_id': self.price_feed_id,
             'recipient_address': self.recipient_address,
             'server_key': self.server_key,
-            'encrypted_client_key': self.encrypted_client_key,  # None if using MPC shares
+            'encrypted_client_key': self.encrypted_client_key,
             'encrypted_upper_bound': self.encrypted_upper_bound,
             'encrypted_lower_bound': self.encrypted_lower_bound,
             'zkp_data': json.loads(self.zkp_data) if self.zkp_data and isinstance(self.zkp_data, str) else self.zkp_data,
-            'mpc_public_key_set': self.mpc_public_key_set,
-            'mpc_share_indices': json.loads(self.mpc_share_indices) if self.mpc_share_indices and isinstance(self.mpc_share_indices, str) else self.mpc_share_indices,
-            'fhe_key_id': self.fhe_key_id,  # Key ID when shares are on MPC servers
             'status': self.status,
-            'utxo_commitments': self.utxo_commitments,  # ZK pool UTXOs
-            'is_private': self.is_private,  # Use ZK pool or not
+            'utxo_commitments': self.utxo_commitments,
+            'is_private': self.is_private,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
