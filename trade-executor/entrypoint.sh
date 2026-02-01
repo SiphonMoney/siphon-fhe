@@ -7,9 +7,10 @@ echo "=== Siphon Trade Executor Starting ==="
 echo "Initializing database..."
 python init_db.py || echo "Database already initialized or init_db.py not found"
 
-# Calculate workers based on CPU cores (2 * cores + 1)
-WORKERS=${GUNICORN_WORKERS:-$(( 2 * $(nproc) + 1 ))}
-echo "Starting gunicorn with $WORKERS workers..."
+# SQLite requires single worker to avoid locking issues
+# Also use --preload to ensure scheduler starts only once
+WORKERS=${GUNICORN_WORKERS:-1}
+echo "Starting gunicorn with $WORKERS worker (SQLite mode)..."
 
 # Start gunicorn with production settings
 exec gunicorn \
@@ -20,4 +21,5 @@ exec gunicorn \
     --access-logfile - \
     --error-logfile - \
     --capture-output \
+    --preload \
     app:app
