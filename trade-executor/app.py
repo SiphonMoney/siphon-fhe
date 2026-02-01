@@ -40,14 +40,20 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
 
 db.init_app(app)
 
-# Enable WAL mode for better SQLite concurrency
+# Enable WAL mode for better SQLite concurrency (deferred until first request)
 if DATABASE_URI and 'sqlite' in DATABASE_URI:
     from sqlalchemy import text
     with app.app_context():
-        with db.engine.connect() as conn:
-            conn.execute(text("PRAGMA journal_mode=WAL"))
-            conn.execute(text("PRAGMA busy_timeout=30000"))
-            conn.commit()
+        # Create tables first if they don't exist
+        db.create_all()
+        # Then set PRAGMA settings
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL"))
+                conn.execute(text("PRAGMA busy_timeout=30000"))
+                conn.commit()
+        except Exception as e:
+            print(f"Warning: Could not set SQLite PRAGMA: {e}")
 
 # Health check endpoint (no auth required)
 @app.route('/health', methods=['GET'])
