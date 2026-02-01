@@ -1,4 +1,4 @@
-43.207.34.231.sslip.io {
+35.177.18.115.sslip.io {
     # Payload Generator
     handle /generatePayload* {
         reverse_proxy payload-generator:5009
