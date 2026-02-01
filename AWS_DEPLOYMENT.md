@@ -1,4 +1,4 @@
-# AWS Deployment Guide - Siphon Strategies Executor
+ # AWS Deployment Guide - Siphon Strategies Executor
 
 This guide walks you through deploying the Siphon Strategies Executor microservices to AWS.
 

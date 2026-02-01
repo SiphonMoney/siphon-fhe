@@ -28,7 +28,26 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI and 'instance' in DATABASE_URI:
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# SQLite concurrency fix: use NullPool to avoid connection sharing issues
+# and set busy_timeout to wait instead of failing on lock
+if DATABASE_URI and 'sqlite' in DATABASE_URI:
+    from sqlalchemy.pool import NullPool
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'poolclass': NullPool,
+        'connect_args': {'timeout': 30, 'check_same_thread': False}
+    }
+
 db.init_app(app)
+
+# Enable WAL mode for better SQLite concurrency
+if DATABASE_URI and 'sqlite' in DATABASE_URI:
+    from sqlalchemy import text
+    with app.app_context():
+        with db.engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.execute(text("PRAGMA busy_timeout=30000"))
+            conn.commit()
 
 # Health check endpoint (no auth required)
 @app.route('/health', methods=['GET'])
