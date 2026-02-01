@@ -17,6 +17,25 @@ services:
       - payload-generator
     restart: unless-stopped
 
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: siphon-postgres
+    environment:
+      POSTGRES_USER: siphon
+      POSTGRES_PASSWORD: siphon_secure_pass
+      POSTGRES_DB: siphon_strategies
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U siphon" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   # 1. Python Trade Executor (The Manager)
   trade-executor:
     build: ./trade-executor
@@ -26,14 +45,17 @@ services:
     environment:
       - FHE_ENGINE_URL=http://fhe-engine:5001/evaluateStrategy
       - PYTH_HERMES_URL=https://hermes.pyth.network
-      - DATABASE_URI=sqlite:////app/data/strategies.db
+      - DATABASE_URI=postgresql://siphon:siphon_secure_pass@postgres:5432/siphon_strategies
       - HELIUS_API_KEY=${HELIUS_API_KEY}
       - SOLANA_NETWORK=${SOLANA_NETWORK:-devnet}
       - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
     volumes:
       - trade-executor-data:/app/data
     depends_on:
-      - fhe-engine
+      postgres:
+        condition: service_healthy
+      fhe-engine:
+        condition: service_started
     restart: unless-stopped
 
   # 2. Rust FHE Engine (The Calculator)
@@ -65,4 +87,6 @@ volumes:
   caddy-data:
     driver: local
   caddy-config:
+    driver: local
+  postgres_data:
     driver: local

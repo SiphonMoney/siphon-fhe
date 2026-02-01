@@ -5,6 +5,7 @@ gunicorn==21.2.0
 python-dotenv==1.0.0
 requests==2.31.0
 Flask-SQLAlchemy==3.1.1
+psycopg2-binary==2.9.9
 
 # Solana SDK (replacing web3.py)
 solana==0.34.3
