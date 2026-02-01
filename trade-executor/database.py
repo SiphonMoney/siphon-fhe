@@ -81,8 +81,10 @@ class Strategy(db.Model):
     # Compressed JSON fields
     zkp_data = db.Column(CompressedText, nullable=True)
     
-    # Status
+    # Status and Transaction
     status = db.Column(db.String, default='PENDING', nullable=False, index=True)
+    tx_hash = db.Column(db.String, nullable=True)  # Solana transaction signature
+    executed_at = db.Column(DateTime, nullable=True)  # When the trade was executed
 
     # ZK Privacy Pool Integration
     utxo_commitments = db.Column(db.Text, nullable=True)
@@ -109,6 +111,8 @@ class Strategy(db.Model):
             'encrypted_lower_bound': self.encrypted_lower_bound,
             'zkp_data': json.loads(self.zkp_data) if self.zkp_data and isinstance(self.zkp_data, str) else self.zkp_data,
             'status': self.status,
+            'tx_hash': self.tx_hash,
+            'executed_at': self.executed_at.isoformat() if self.executed_at else None,
             'utxo_commitments': self.utxo_commitments,
             'is_private': self.is_private,
             'created_at': self.created_at.isoformat() if self.created_at else None,

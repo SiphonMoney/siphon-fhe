@@ -202,7 +202,7 @@ def execute_trade(strategy, current_price):
         print(f"   ❌ [Executor] Error: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return None  # Return None instead of False for consistency
 
 
 def execute_direct_transfer(client, executor_keypair, recipient_address, amount, asset):
@@ -238,13 +238,14 @@ def execute_direct_transfer(client, executor_keypair, recipient_address, amount,
         )
 
         if tx_sig.value:
-            print(f"   ✅ Transfer successful! Sig: {tx_sig.value}")
-            print(f"   🔗 https://explorer.solana.com/tx/{tx_sig.value}?cluster=devnet")
+            tx_hash = str(tx_sig.value)
+            print(f"   ✅ Transfer successful! Sig: {tx_hash}")
+            print(f"   🔗 https://explorer.solana.com/tx/{tx_hash}?cluster=devnet")
             print("="*60)
-            return True
+            return tx_hash  # Return tx_hash instead of boolean
         else:
             print(f"   ❌ Transfer failed: {tx_sig}")
-            return False
+            return None
     else:
         # SPL token transfer - TODO: implement
         print(f"   ❌ SPL transfers not yet implemented for {asset}")
@@ -342,13 +343,14 @@ def execute_spl_transfer(client, executor_keypair, recipient_address, amount, mi
     )
 
     if tx_sig.value:
-        print(f"   ✅ SPL Transfer successful! Sig: {tx_sig.value}")
-        print(f"   🔗 https://explorer.solana.com/tx/{tx_sig.value}?cluster=devnet")
+        tx_hash = str(tx_sig.value)
+        print(f"   ✅ SPL Transfer successful! Sig: {tx_hash}")
+        print(f"   🔗 https://explorer.solana.com/tx/{tx_hash}?cluster=devnet")
         print("="*60)
-        return True
+        return tx_hash  # Return tx_hash instead of boolean
     else:
         print(f"   ❌ SPL Transfer failed: {tx_sig}")
-        return False
+        return None
 
 
 def execute_swap_and_transfer(client, executor_keypair, recipient_address, amount, asset_in, asset_out):

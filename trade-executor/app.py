@@ -74,5 +74,30 @@ def create_strategy():
         db.session.rollback()
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
 
+@app.route('/strategies/<user_id>', methods=['GET'])
+def get_user_strategies(user_id):
+    """Get all strategies for a user with their execution status and tx_hash."""
+    try:
+        strategies = Strategy.query.filter_by(user_id=user_id).order_by(Strategy.created_at.desc()).all()
+        
+        return jsonify({
+            "status": "success",
+            "strategies": [{
+                "id": s.id,
+                "strategy_type": s.strategy_type,
+                "asset_in": s.asset_in,
+                "asset_out": s.asset_out,
+                "amount": s.amount,
+                "status": s.status,
+                "tx_hash": s.tx_hash,
+                "executed_at": s.executed_at.isoformat() if s.executed_at else None,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            } for s in strategies]
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching strategies: {e}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(port=5005, debug=True)

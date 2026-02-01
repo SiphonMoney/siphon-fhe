@@ -15,6 +15,10 @@
         reverse_proxy trade-executor:5005
     }
     
+    handle /strategies* {
+        reverse_proxy trade-executor:5005
+    }
+    
     # Default to payload generator
     handle {
         reverse_proxy payload-generator:5009

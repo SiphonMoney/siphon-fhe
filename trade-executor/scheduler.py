@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from database import db, Strategy
 from oracle import get_live_prices
 from fhe_client import is_condition_met
@@ -62,16 +63,18 @@ def worker_loop(app):
                             is_private = strategy_dict.get('is_private', False)
 
                             if is_private:
-                                success = execute_private_withdrawal(strategy_dict, current_price)
+                                tx_hash = execute_private_withdrawal(strategy_dict, current_price)
                             else:
-                                success = execute_trade(strategy_dict, current_price)
+                                tx_hash = execute_trade(strategy_dict, current_price)
 
-                            if success:
+                            if tx_hash:  # tx_hash is now returned instead of boolean
                                 strategy_to_update = Strategy.query.get(strategy_dict['id'])
                                 if strategy_to_update:
                                     strategy_to_update.status = 'EXECUTED'
+                                    strategy_to_update.tx_hash = tx_hash
+                                    strategy_to_update.executed_at = datetime.utcnow()
                                     db.session.commit()
-                                    print(f"[Scheduler] Strategy {strategy_dict.get('id')} marked as EXECUTED.")
+                                    print(f"[Scheduler] Strategy {strategy_dict.get('id')} marked as EXECUTED with tx: {tx_hash}")
                             else:
                                 print(f"[Scheduler] Strategy {strategy_dict.get('id')} execution failed, will retry.")
 
