@@ -9,60 +9,92 @@ pub struct EvaluationPayload {
     encrypted_upper_bound: String,
     encrypted_lower_bound: String,
     server_key: String,
-    current_price_cents: u32,
-    encrypted_client_key: String, // Client key for decryption
+    current_price_cents: u64,  // u64 — u32 overflows at ~$42k (BTC/ETH prices)
+    encrypted_client_key: String,
 }
 
 #[derive(Serialize)]
 pub struct EvaluationResponse {
     is_triggered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
-/// Decrypt the FHE result using the client key
-fn decrypt_result(encrypted_result: &RadixCiphertext, client_key_hex: &str) -> bool {
-    println!("[FHE Engine] Decrypting result...");
-    let client_key_bytes = hex::decode(client_key_hex).unwrap();
-    let client_key: RadixClientKey = bincode::deserialize(&client_key_bytes).unwrap();
-    client_key.decrypt::<u64>(encrypted_result) == 1
+fn deserialize_hex<T: for<'de> serde::Deserialize<'de>>(hex_str: &str, label: &str) -> Result<T, String> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| format!("hex decode failed for {}: {}", label, e))?;
+    bincode::deserialize(&bytes)
+        .map_err(|e| format!("bincode deserialize failed for {}: {}", label, e))
+}
+
+fn decrypt_result(encrypted_result: &RadixCiphertext, client_key_hex: &str) -> Result<bool, String> {
+    let client_key: RadixClientKey = deserialize_hex(client_key_hex, "client_key")?;
+    Ok(client_key.decrypt::<u64>(encrypted_result) == 1)
 }
 
 pub async fn evaluate_strategy(
     Json(payload): Json<EvaluationPayload>,
 ) -> (StatusCode, Json<EvaluationResponse>) {
-    
-    println!("[Rust FHE Engine] Received evaluation request.");
+    println!("[FHE Engine] Evaluating strategy_type='{}' current_price_cents={}",
+        payload.strategy_type, payload.current_price_cents);
 
-    // 1. Deserialize the server key
-    let server_key: ServerKey = bincode::deserialize(&hex::decode(payload.server_key).unwrap()).unwrap();
-    
-    // 2. Perform homomorphic computation based on strategy type
+    let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
+        Ok(k) => k,
+        Err(e) => {
+            println!("[FHE Engine] ❌ {}", e);
+            return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) }));
+        }
+    };
+
+    let price = payload.current_price_cents;
+
     let encrypted_result = match payload.strategy_type.as_str() {
         "LIMIT_ORDER" | "BRACKET_ORDER_SHORT" => {
-            let enc_upper: RadixCiphertext = bincode::deserialize(&hex::decode(payload.encrypted_upper_bound).unwrap()).unwrap();
-            let enc_lower: RadixCiphertext = bincode::deserialize(&hex::decode(payload.encrypted_lower_bound).unwrap()).unwrap();
-            
-            let is_above = fhe_core::homomorphic_check(&server_key, &enc_upper, "GTE", payload.current_price_cents);
-            let is_below = fhe_core::homomorphic_check(&server_key, &enc_lower, "LTE", payload.current_price_cents);
-
+            let enc_upper: RadixCiphertext = match deserialize_hex(&payload.encrypted_upper_bound, "upper_bound") {
+                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            };
+            let enc_lower: RadixCiphertext = match deserialize_hex(&payload.encrypted_lower_bound, "lower_bound") {
+                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            };
+            let is_above = match fhe_core::homomorphic_check(&server_key, &enc_upper, "GTE", price) {
+                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            };
+            let is_below = match fhe_core::homomorphic_check(&server_key, &enc_lower, "LTE", price) {
+                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            };
             fhe_core::homomorphic_or(&server_key, &is_above, &is_below)
         },
         "LIMIT_BUY_DIP" => {
-             let enc_lower: RadixCiphertext = bincode::deserialize(&hex::decode(payload.encrypted_lower_bound).unwrap()).unwrap();
-             fhe_core::homomorphic_check(&server_key, &enc_lower, "LTE", payload.current_price_cents)
+            let enc_lower: RadixCiphertext = match deserialize_hex(&payload.encrypted_lower_bound, "lower_bound") {
+                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            };
+            match fhe_core::homomorphic_check(&server_key, &enc_lower, "LTE", price) {
+                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            }
         },
         "LIMIT_SELL_RALLY" => {
-             let enc_upper: RadixCiphertext = bincode::deserialize(&hex::decode(payload.encrypted_upper_bound).unwrap()).unwrap();
-             fhe_core::homomorphic_check(&server_key, &enc_upper, "GTE", payload.current_price_cents)
+            let enc_upper: RadixCiphertext = match deserialize_hex(&payload.encrypted_upper_bound, "upper_bound") {
+                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            };
+            match fhe_core::homomorphic_check(&server_key, &enc_upper, "GTE", price) {
+                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+            }
         },
         _ => {
-            println!("[Rust FHE Engine] ❌ Error: Unknown strategy type '{}'", payload.strategy_type);
-            return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false }));
+            let msg = format!("Unknown strategy_type '{}'", payload.strategy_type);
+            println!("[FHE Engine] ❌ {}", msg);
+            return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(msg) }));
         }
     };
-    
-    // 3. Decrypt the result using the client key
-    let is_triggered = decrypt_result(&encrypted_result, &payload.encrypted_client_key);
 
-    println!("[Rust FHE Engine] Evaluation complete. is_triggered: {}", is_triggered);
-    (StatusCode::OK, Json(EvaluationResponse { is_triggered }))
+    match decrypt_result(&encrypted_result, &payload.encrypted_client_key) {
+        Ok(is_triggered) => {
+            println!("[FHE Engine] ✅ Evaluation complete. is_triggered={}", is_triggered);
+            (StatusCode::OK, Json(EvaluationResponse { is_triggered, error: None }))
+        },
+        Err(e) => {
+            println!("[FHE Engine] ❌ Decrypt failed: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) }))
+        }
+    }
 }

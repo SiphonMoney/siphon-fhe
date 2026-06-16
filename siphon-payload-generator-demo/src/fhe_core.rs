@@ -38,7 +38,7 @@ pub fn derive_seed_from_mpc_pubkey(pubkey_hex: &str) -> Result<[u8; 32], String>
     Ok(seed)
 }
 
-pub fn encrypt_price(price_u32: u32, cks: &RadixClientKey) -> RadixCiphertext {
-    // Encrypts the integer price (which holds price * 100)
-    cks.encrypt(price_u32 as u64)
+pub fn encrypt_price(price_cents: u64, cks: &RadixClientKey) -> RadixCiphertext {
+    // Encrypts price in cents (price * 100); u64 supports prices above $42,949
+    cks.encrypt(price_cents)
 }

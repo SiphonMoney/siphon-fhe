@@ -27,9 +27,7 @@ def require_auth(f):
         
         expected_token = os.getenv('API_TOKEN', '')
         if not expected_token:
-            # Development mode - allow any token
-            print("⚠️  WARNING: API_TOKEN not set, allowing all requests")
-            return f(*args, **kwargs)
+            return jsonify({"error": "Service misconfigured: API_TOKEN not set"}), 500
         
         if token != expected_token:
             return jsonify({"error": "Invalid authentication token"}), 401

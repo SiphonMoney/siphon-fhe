@@ -106,35 +106,32 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     let (client_key, server_key) = fhe_core::generate_fhe_keys();
     println!("✅ FHE keys generated");
 
-    // 2️⃣ Encrypt bounds
-    let encrypted_upper = fhe_core::encrypt_price((input.upper_bound * 100.0) as u32, &client_key);
-    let encrypted_lower = fhe_core::encrypt_price((input.lower_bound * 100.0) as u32, &client_key);
+    // 2️⃣ Encrypt bounds (u64 to support prices above $42,949)
+    let encrypted_upper = fhe_core::encrypt_price((input.upper_bound * 100.0) as u64, &client_key);
+    let encrypted_lower = fhe_core::encrypt_price((input.lower_bound * 100.0) as u64, &client_key);
 
-    // 3️⃣ Extract ZK Data
-    let default_val = json!("0"); 
-    
-    let proof = input.zk_proof.get("proof").unwrap_or(&default_val);
-    let nullifier = input.zk_proof.get("nullifierHash").unwrap_or(&default_val);
-    let new_commitment = input.zk_proof.get("newCommitment").unwrap_or(&default_val);
-    
-    let root = input.zk_proof.get("root")
-        .or_else(|| input.zk_proof.get("stateRoot"))
-        .unwrap_or(&default_val);
-    
-    let amount_val = input.zk_proof.get("atomicAmount")
-        .cloned()
-        .unwrap_or_else(|| json!((input.amount * 1_000_000.0) as u64));
+    // 3️⃣ Extract ZK Data (Groth16 format: pA/pB/pC + stateRoot/nullifierHash/newCommitment)
+    let default_str = json!("0");
+    let default_arr: Value = json!([]);
 
-    // 4️⃣ Construct JSON for Python Executor
+    let pa           = input.zk_proof.get("pA").unwrap_or(&default_arr);
+    let pb           = input.zk_proof.get("pB").unwrap_or(&default_arr);
+    let pc           = input.zk_proof.get("pC").unwrap_or(&default_arr);
+    let state_root   = input.zk_proof.get("stateRoot").unwrap_or(&default_str);
+    let nullifier    = input.zk_proof.get("nullifierHash").unwrap_or(&default_str);
+    let new_commitment = input.zk_proof.get("newCommitment").unwrap_or(&default_str);
+
+    // 4️⃣ Construct JSON for Python EVM Executor
+    // evm_executor.py reads: zk.get("proof") or zk, then checks pA/stateRoot
     let zkp_data_string = serde_json::to_string(&json!({
-        "proof": proof,
-        "publicInputs": {
-            "root": root,             
-            "nullifier": nullifier,
-            "newCommitment": new_commitment,
-            "asset": input.asset_in, 
-            "amount": amount_val
-        }
+        "pA": pa,
+        "pB": pb,
+        "pC": pc,
+        "stateRoot": state_root,
+        "nullifierHash": nullifier,
+        "newCommitment": new_commitment,
+        "asset": input.asset_in,
+        "amount": (input.amount * 1_000_000.0) as u64
     }))
     .unwrap();
 

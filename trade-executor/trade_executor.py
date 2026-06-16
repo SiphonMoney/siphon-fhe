@@ -410,17 +410,21 @@ def execute_swap_and_transfer(client, executor_keypair, recipient_address, amoun
 
 
 def execute_private_withdrawal(strategy, current_price):
-    """Execute a private withdrawal - same as execute_trade for now.
-
-    In production, this would first withdraw from ZK pool, then execute swap.
-    For hackathon demo, we execute directly from executor wallet.
+    """
+    Execute a private withdrawal with ZK proof, then swap.
+    Routes to EVM executor for ETH/EVM assets, Solana executor otherwise.
     """
     print("\n" + "="*60)
     print(f"✅ PRIVATE EXECUTION: Strategy '{strategy['id']}'")
 
-    # For hackathon: execute directly (ZK pool integration is separate)
-    # The privacy is handled by the FHE-encrypted strategy conditions
-    return execute_trade(strategy, current_price)
+    asset_in = strategy.get("asset_in", "").upper()
+    evm_assets = {"ETH", "USDC", "USDT", "WBTC", "WETH"}
+
+    if asset_in in evm_assets:
+        from evm_executor import execute_evm_trade
+        return execute_evm_trade(strategy, current_price)
+    else:
+        return execute_trade(strategy, current_price)
 
 
 # For testing

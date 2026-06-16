@@ -10,8 +10,15 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() {
-    // Load environment variables from .env file
-    dotenv::dotenv().ok();
+    // Load env from shared location (trade-executor/.env) or local fallback
+    let env_paths = ["../trade-executor/.env", ".env", "../../trade-executor/.env"];
+    for path in &env_paths {
+        if std::path::Path::new(path).exists() {
+            dotenv::from_path(path).ok();
+            println!("Loaded env from {}", path);
+            break;
+        }
+    }
     
     println!("--- Starting Syphon FHE Co-Processor (Rust - REAL COMPUTE MODE) ---");
     

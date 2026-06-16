@@ -83,7 +83,7 @@ class Strategy(db.Model):
     
     # Status and Transaction
     status = db.Column(db.String, default='PENDING', nullable=False, index=True)
-    tx_hash = db.Column(db.String, nullable=True)  # Solana transaction signature
+    tx_hash = db.Column(db.String, nullable=True)
     executed_at = db.Column(DateTime, nullable=True)  # When the trade was executed
 
     # ZK Privacy Pool Integration

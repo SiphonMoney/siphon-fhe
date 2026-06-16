@@ -125,4 +125,4 @@ def get_user_strategies(user_id):
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(port=5005, debug=True)
+    app.run(port=5005, debug=False)
