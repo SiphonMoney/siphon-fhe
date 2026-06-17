@@ -4,6 +4,7 @@ from database import db, Strategy
 from oracle import get_live_prices
 from fhe_client import is_condition_met
 from trade_executor import execute_trade, execute_private_withdrawal
+from evm_executor import FatalExecutionError, NullifierSpentSwapFailed
 from config import CHECK_INTERVAL_SECONDS, PYTH_PRICE_FEED_IDS
 
 
@@ -53,8 +54,16 @@ def worker_loop(app):
                         sid = strategy_dict.get('id')
 
                         # ── 1. FHE evaluation ──────────────────────────────────
+                        condition_tree = strategy_dict.get('condition_tree')
+
                         t_fhe = time.monotonic()
-                        triggered = is_condition_met(strategy_dict, current_price)
+                        if condition_tree:
+                            # New-style: recursive condition tree
+                            from condition_evaluator import evaluate_tree
+                            triggered = evaluate_tree(condition_tree, live_prices, strategy_dict)
+                        else:
+                            # Legacy: single-asset FHE evaluation
+                            triggered = is_condition_met(strategy_dict, current_price)
                         fhe_ms = (time.monotonic() - t_fhe) * 1000
 
                         print(f"[Benchmark] strategy={sid}")
@@ -65,13 +74,65 @@ def worker_loop(app):
                         if triggered:
                             is_private = strategy_dict.get('is_private', False)
 
-                            # ── 2. Total execution ─────────────────────────────
-                            t_exec = time.monotonic()
+                            # ── 2. Mark nullifier pending to block double-spend during execution
+                            _note_for_exec = None
+                            try:
+                                import json as _json
+                                zkp = strategy_dict.get('zkp_data')
+                                if zkp:
+                                    zk = zkp if isinstance(zkp, dict) else _json.loads(zkp)
+                                    _nullifier_hash = str(zk.get('nullifierHash', ''))
+                                    if _nullifier_hash:
+                                        from database import Note
+                                        _note_for_exec = Note.query.filter_by(nullifier_hash=_nullifier_hash).first()
+                                        if _note_for_exec:
+                                            _note_for_exec.spent = 'pending'
+                                            db.session.commit()
+                                            print(f"[Scheduler] Note {_nullifier_hash[:16]}... marked spent=pending")
+                            except Exception as _ne:
+                                print(f"[Scheduler] ⚠️ Could not mark note pending: {_ne}")
 
-                            if is_private:
-                                tx_hash = execute_private_withdrawal(strategy_dict, current_price)
-                            else:
-                                tx_hash = execute_trade(strategy_dict, current_price)
+                            # ── 3. Total execution ─────────────────────────────
+                            t_exec = time.monotonic()
+                            try:
+                                if is_private:
+                                    tx_hash = execute_private_withdrawal(strategy_dict, current_price)
+                                else:
+                                    tx_hash = execute_trade(strategy_dict, current_price)
+                            except NullifierSpentSwapFailed as swap_fatal:
+                                exec_ms = (time.monotonic() - t_exec) * 1000
+                                print(f"[Scheduler] ⚠️  ZK withdraw confirmed but swap failed for strategy {strategy_dict.get('id')}: {swap_fatal}")
+                                strategy_to_update = Strategy.query.get(strategy_dict['id'])
+                                if strategy_to_update:
+                                    strategy_to_update.status = 'FAILED'
+                                    db.session.commit()
+                                # Nullifier IS spent on-chain — mark true so it's never reused
+                                if _note_for_exec:
+                                    try:
+                                        _note_for_exec.spent = 'true'
+                                        db.session.commit()
+                                        print(f"[Scheduler] Note marked spent=true (nullifier spent, swap failed)")
+                                    except Exception:
+                                        pass
+                                print(f"[Scheduler] Strategy {strategy_dict.get('id')} marked FAILED — funds in executor wallet.")
+                                continue
+                            except FatalExecutionError as fatal:
+                                exec_ms = (time.monotonic() - t_exec) * 1000
+                                print(f"[Scheduler] ❌ Fatal error for strategy {strategy_dict.get('id')}: {fatal}")
+                                strategy_to_update = Strategy.query.get(strategy_dict['id'])
+                                if strategy_to_update:
+                                    strategy_to_update.status = 'FAILED'
+                                    db.session.commit()
+                                # Revert note to false — nullifier not actually spent on-chain
+                                if _note_for_exec:
+                                    try:
+                                        _note_for_exec.spent = 'false'
+                                        db.session.commit()
+                                        print(f"[Scheduler] Note reverted to spent=false (fatal error)")
+                                    except Exception:
+                                        pass
+                                print(f"[Scheduler] Strategy {strategy_dict.get('id')} marked FAILED — will not retry.")
+                                continue
 
                             exec_ms = (time.monotonic() - t_exec) * 1000
                             print(f"[Benchmark]   total_execution     = {exec_ms:>8.1f} ms  tx={tx_hash}")
@@ -85,7 +146,32 @@ def worker_loop(app):
                                     strategy_to_update.executed_at = datetime.utcnow()
                                     db.session.commit()
                                     print(f"[Scheduler] Strategy {strategy_dict.get('id')} EXECUTED: {tx_hash}")
+
+                                # Mark the nullifier fully spent now that tx is confirmed on-chain
+                                try:
+                                    import json as _json
+                                    zkp = strategy_dict.get('zkp_data')
+                                    if zkp:
+                                        zk = zkp if isinstance(zkp, dict) else _json.loads(zkp)
+                                        nullifier_hash = str(zk.get('nullifierHash', ''))
+                                        if nullifier_hash:
+                                            from database import Note
+                                            note = Note.query.filter_by(nullifier_hash=nullifier_hash).first()
+                                            if note:
+                                                note.spent = 'true'
+                                                db.session.commit()
+                                                print(f"[Scheduler] Note {nullifier_hash[:16]}... marked spent=true")
+                                except Exception as _se:
+                                    print(f"[Scheduler] ⚠️ Could not mark note spent=true: {_se}")
                             else:
+                                # Revert note to false — tx didn't go through, safe to retry
+                                if _note_for_exec:
+                                    try:
+                                        _note_for_exec.spent = 'false'
+                                        db.session.commit()
+                                        print(f"[Scheduler] Note reverted to spent=false (tx failed, will retry)")
+                                    except Exception:
+                                        pass
                                 print(f"[Scheduler] Strategy {strategy_dict.get('id')} execution failed, will retry.")
 
                     except Exception as strategy_err:

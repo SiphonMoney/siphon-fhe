@@ -81,6 +81,24 @@ services:
       - trade-executor
     restart: unless-stopped
 
+  # 4. Proving Relayer (ZK proof generation)
+  proving-relayer:
+    build: ./proving-relayer
+    container_name: siphon-proving-relayer
+    ports:
+      - "5010:5010"
+    environment:
+      - ZKEY_PATH=/app/zk/zkey_final.zkey
+      - WASM_PATH=/app/zk/main.wasm
+      - WITNESS_GEN_JS=/app/zk/generate_witness.js
+      - RAPIDSNARK_BIN=/usr/local/bin/rapidsnark
+      - NODE_BIN=node
+    volumes:
+      - ../siphon-zk/circuits/build/zkey_final.zkey:/app/zk/zkey_final.zkey:ro
+      - ../siphon-zk/circuits/build/main_js/main.wasm:/app/zk/main.wasm:ro
+      - ../siphon-zk/circuits/build/main_js/generate_witness.js:/app/zk/generate_witness.js:ro
+    restart: unless-stopped
+
 volumes:
   trade-executor-data:
     driver: local

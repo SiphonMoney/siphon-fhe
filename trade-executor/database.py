@@ -75,8 +75,8 @@ class Strategy(db.Model):
     encrypted_client_key = db.Column(CompressedEncryptedText, nullable=False)  # Required for decryption
     
     # Compressed but not encrypted (FHE ciphertexts - already encrypted by FHE)
-    encrypted_upper_bound = db.Column(CompressedText, nullable=False)
-    encrypted_lower_bound = db.Column(CompressedText, nullable=False)
+    encrypted_upper_bound = db.Column(CompressedText, nullable=True)
+    encrypted_lower_bound = db.Column(CompressedText, nullable=True)
     
     # Compressed JSON fields
     zkp_data = db.Column(CompressedText, nullable=True)
@@ -89,6 +89,11 @@ class Strategy(db.Model):
     # ZK Privacy Pool Integration
     utxo_commitments = db.Column(db.Text, nullable=True)
     is_private = db.Column(db.Boolean, default=True, nullable=False, index=True)
+
+    # Custom Strategies + Li.Fi Swaps Integration
+    condition_tree = db.Column(db.Text, nullable=True)
+    to_chain       = db.Column(db.String(20), nullable=True)
+    from_chain     = db.Column(db.String(20), nullable=True)
 
     # Timestamps
     created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -115,6 +120,37 @@ class Strategy(db.Model):
             'executed_at': self.executed_at.isoformat() if self.executed_at else None,
             'utxo_commitments': self.utxo_commitments,
             'is_private': self.is_private,
+            'condition_tree': json.loads(self.condition_tree) if self.condition_tree else None,
+            'to_chain': self.to_chain,
+            'from_chain': self.from_chain,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+
+class Note(db.Model):
+    __tablename__ = 'notes'
+    id             = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    wallet         = db.Column(db.String(42), nullable=False, index=True)
+    ciphertext     = db.Column(db.Text, nullable=False)
+    iv             = db.Column(db.String(64), nullable=False)
+    commitment     = db.Column(db.String(80), nullable=False)
+    nullifier_hash = db.Column(db.String(80), nullable=False)
+    chain_id       = db.Column(db.Integer, nullable=False, default=11155111)
+    asset          = db.Column(db.String(10), nullable=False, default='ETH')
+    spent          = db.Column(db.String(10), nullable=False, default='false')  # 'false' | 'pending' | 'true'
+    created_at     = db.Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'wallet': self.wallet,
+            'ciphertext': self.ciphertext,
+            'iv': self.iv,
+            'commitment': self.commitment,
+            'nullifier_hash': self.nullifier_hash,
+            'chain_id': self.chain_id,
+            'asset': self.asset,
+            'spent': self.spent,  # 'false' | 'pending' | 'true'
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+

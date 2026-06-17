@@ -18,6 +18,11 @@
     handle /strategies* {
         reverse_proxy trade-executor:5005
     }
+
+    # Proving Relayer
+    handle /prove* {
+        reverse_proxy proving-relayer:5010
+    }
     
     # Default to payload generator
     handle {

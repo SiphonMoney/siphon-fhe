@@ -98,3 +98,44 @@ pub async fn evaluate_strategy(
         }
     }
 }
+
+#[derive(Deserialize)]
+pub struct ConditionPayload {
+    encrypted_bound: String,
+    condition: String,          // "GTE" or "LTE"
+    current_price_cents: u64,
+    server_key: String,
+    encrypted_client_key: String,
+}
+
+pub async fn evaluate_condition(
+    Json(payload): Json<ConditionPayload>,
+) -> (StatusCode, Json<EvaluationResponse>) {
+    println!("[FHE Engine] evaluateCondition condition='{}' price_cents={}",
+        payload.condition, payload.current_price_cents);
+
+    let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
+        Ok(k) => k,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+    };
+
+    let enc_bound: RadixCiphertext = match deserialize_hex(&payload.encrypted_bound, "encrypted_bound") {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+    };
+
+    let result = match fhe_core::homomorphic_check(
+        &server_key, &enc_bound, &payload.condition, payload.current_price_cents
+    ) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+    };
+
+    match decrypt_result(&result, &payload.encrypted_client_key) {
+        Ok(is_triggered) => {
+            println!("[FHE Engine] ✅ evaluateCondition result: {}", is_triggered);
+            (StatusCode::OK, Json(EvaluationResponse { is_triggered, error: None }))
+        },
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+    }
+}

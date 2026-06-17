@@ -7,6 +7,7 @@ from database import db, Strategy
 from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
 from auth import rate_limit
+from address_validator import validate_recipient
 
 
 app = Flask(__name__)
@@ -40,12 +41,39 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
 
 db.init_app(app)
 
+from notes import notes_bp
+app.register_blueprint(notes_bp)
+
 # Enable WAL mode for better SQLite concurrency (deferred until first request)
 if DATABASE_URI and 'sqlite' in DATABASE_URI:
     from sqlalchemy import text
     with app.app_context():
         # Create tables first if they don't exist
         db.create_all()
+        # Apply migrations for new columns if they don't exist
+        try:
+            with db.engine.connect() as conn:
+                for col, typedef in [
+                    ("condition_tree", "TEXT"),
+                    ("to_chain", "VARCHAR(20)"),
+                    ("from_chain", "VARCHAR(20)"),
+                ]:
+                    try:
+                        conn.execute(text(f"ALTER TABLE strategy ADD COLUMN {col} {typedef} DEFAULT ''"))
+                        conn.commit()
+                    except Exception:
+                        pass  # column already exists
+
+                # Migrate notes.spent from boolean (0/1) to string ('false'/'true'/'pending')
+                try:
+                    conn.execute(text("UPDATE notes SET spent = 'true' WHERE spent = '1' OR spent = 'True'"))
+                    conn.execute(text("UPDATE notes SET spent = 'false' WHERE spent = '0' OR spent = 'False' OR spent = ''"))
+                    conn.commit()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Warning: Could not apply SQLite migrations: {e}")
+            
         # Then set PRAGMA settings
         try:
             with db.engine.connect() as conn:
@@ -76,18 +104,31 @@ def create_strategy():
         strategy_type = data.get("strategy_type", "")
         token_symbol = data.get('asset_in') if "LONG" in strategy_type or "SELL" in strategy_type else data.get('asset_out')
 
+        # Validate recipient address matches destination chain
+        to_chain = data.get('to_chain', '11155111')
+        recipient = data.get('recipient_address', '')
+        valid, err = validate_recipient(recipient, str(to_chain))
+        if not valid:
+            return jsonify({"error": err}), 400
+
+        # Support condition_tree (new) OR legacy upper/lower bound (old)
+        condition_tree = data.get('condition_tree')
+
         new_strategy = Strategy(
             user_id=data['user_id'],
             strategy_type=strategy_type,
             asset_in=data['asset_in'],
             asset_out=data['asset_out'],
             amount=data['amount'],
-            recipient_address=data['recipient_address'],
-            encrypted_upper_bound=json.dumps(data.get('encrypted_upper_bound')),
-            encrypted_lower_bound=json.dumps(data.get('encrypted_lower_bound')),
-            server_key=json.dumps(data.get('server_key')),
-            encrypted_client_key=json.dumps(data.get('encrypted_client_key')),
-            zkp_data=json.dumps(data.get('zkp_data') or data.get('zk_proof')) if (data.get('zkp_data') or data.get('zk_proof')) else None
+            recipient_address=recipient,
+            encrypted_upper_bound=data.get('encrypted_upper_bound'),
+            encrypted_lower_bound=data.get('encrypted_lower_bound'),
+            server_key=data.get('server_key'),
+            encrypted_client_key=data.get('encrypted_client_key'),
+            zkp_data=json.dumps(data.get('zkp_data') or data.get('zk_proof')) if (data.get('zkp_data') or data.get('zk_proof')) else None,
+            condition_tree=json.dumps(condition_tree) if condition_tree else None,
+            to_chain=str(to_chain),
+            from_chain=str(data.get('from_chain', '11155111')),
         )
         
         db.session.add(new_strategy)

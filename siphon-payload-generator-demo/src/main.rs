@@ -18,10 +18,18 @@ struct StrategyInput {
     asset_in: String,
     asset_out: String,
     amount: f64,
+    #[serde(default)]
     upper_bound: f64,
+    #[serde(default)]
     lower_bound: f64,
     recipient_address: String,
     zk_proof: Value, 
+    #[serde(default)]
+    condition_tree: Option<serde_json::Value>,
+    #[serde(default)]
+    to_chain: Option<String>,
+    #[serde(default)]
+    from_chain: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -33,11 +41,19 @@ struct StrategyPayload {
     amount: f64,
     recipient_address: String,
     zkp_data: String,
-    encrypted_upper_bound: String,
-    encrypted_lower_bound: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_upper_bound: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_lower_bound: Option<String>,
     server_key: String,
     encrypted_client_key: String,
     payload_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    condition_tree: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to_chain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_chain: Option<String>,
 }
 
 #[tokio::main]
@@ -98,7 +114,33 @@ async fn health_check() -> impl IntoResponse {
     Json(json!({"status": "healthy", "service": "payload-generator"}))
 }
 
-async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoResponse {
+fn encrypt_tree(
+    node: &mut serde_json::Value,
+    client_key: &tfhe::integer::RadixClientKey,
+    fhe_core_fn: &impl Fn(u64, &tfhe::integer::RadixClientKey) -> tfhe::integer::RadixCiphertext,
+    encode_fn: &impl Fn(Vec<u8>) -> String,
+) {
+    if node.get("op").and_then(|v| v.as_str()) == Some("LEAF") {
+        if let Some(bound_val) = node.get("bound").and_then(|v| v.as_f64()) {
+            let price_cents = (bound_val * 100.0) as u64;
+            let encrypted = fhe_core_fn(price_cents, client_key);
+            let hex_str = encode_fn(bincode::serialize(&encrypted).unwrap());
+            if let Some(obj) = node.as_object_mut() {
+                obj.insert(
+                    "encrypted_bound".to_string(),
+                    serde_json::Value::String(hex_str),
+                );
+                obj.remove("bound");
+            }
+        }
+    } else if let Some(children) = node.get_mut("conditions").and_then(|v| v.as_array_mut()) {
+        for child in children.iter_mut() {
+            encrypt_tree(child, client_key, fhe_core_fn, encode_fn);
+        }
+    }
+}
+
+async fn handle_generate_payload(Json(mut input): Json<StrategyInput>) -> impl IntoResponse {
     println!("🧠 Processing payload for user: {}", input.user_id);
 
     // 1️⃣ Generate FHE keys
@@ -106,9 +148,26 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
     let (client_key, server_key) = fhe_core::generate_fhe_keys();
     println!("✅ FHE keys generated");
 
-    // 2️⃣ Encrypt bounds (u64 to support prices above $42,949)
-    let encrypted_upper = fhe_core::encrypt_price((input.upper_bound * 100.0) as u64, &client_key);
-    let encrypted_lower = fhe_core::encrypt_price((input.lower_bound * 100.0) as u64, &client_key);
+    // 2️⃣ Encrypt bounds (recursively for tree or directly for legacy)
+    let mut condition_tree = input.condition_tree.clone();
+    let (enc_upper_hex, enc_lower_hex) = if condition_tree.is_some() {
+        if let Some(ref mut tree) = condition_tree {
+            encrypt_tree(
+                tree,
+                &client_key,
+                &|cents, ck| fhe_core::encrypt_price(cents, ck),
+                &|bytes| encode(bytes),
+            );
+        }
+        (None, None)
+    } else {
+        let encrypted_upper = fhe_core::encrypt_price((input.upper_bound * 100.0) as u64, &client_key);
+        let encrypted_lower = fhe_core::encrypt_price((input.lower_bound * 100.0) as u64, &client_key);
+        (
+            Some(encode(bincode::serialize(&encrypted_upper).unwrap())),
+            Some(encode(bincode::serialize(&encrypted_lower).unwrap())),
+        )
+    };
 
     // 3️⃣ Extract ZK Data (Groth16 format: pA/pB/pC + stateRoot/nullifierHash/newCommitment)
     let default_str = json!("0");
@@ -143,11 +202,14 @@ async fn handle_generate_payload(Json(input): Json<StrategyInput>) -> impl IntoR
         amount: input.amount,
         recipient_address: input.recipient_address.clone(),
         zkp_data: zkp_data_string,
-        encrypted_upper_bound: encode(bincode::serialize(&encrypted_upper).unwrap()),
-        encrypted_lower_bound: encode(bincode::serialize(&encrypted_lower).unwrap()),
+        encrypted_upper_bound: enc_upper_hex,
+        encrypted_lower_bound: enc_lower_hex,
         server_key: encode(bincode::serialize(&server_key).unwrap()),
         encrypted_client_key: encode(bincode::serialize(&client_key).unwrap()),
         payload_id: Uuid::new_v4().to_string(),
+        condition_tree,
+        to_chain: input.to_chain.clone(),
+        from_chain: input.from_chain.clone(),
     };
 
     // 5️⃣ Send to Python Orchestrator

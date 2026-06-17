@@ -46,6 +46,14 @@ CUSTOM_ERRORS = {
     bytes.fromhex("e346d81d"): "InvalidSwapAmount()",
 }
 
+class FatalExecutionError(Exception):
+    """Raised when execution should not be retried (e.g. nullifier already spent)."""
+    pass
+
+class NullifierSpentSwapFailed(FatalExecutionError):
+    """ZK withdraw confirmed (nullifier spent) but swap/bridge failed. Funds are in executor wallet."""
+    pass
+
 def decode_revert(data: bytes) -> str:
     """Decode a revert reason from raw bytes (custom errors or revert string)."""
     if not data:
@@ -63,12 +71,10 @@ def decode_revert(data: bytes) -> str:
             pass
     return f"Unknown revert selector: {selector.hex()}, raw: {data.hex()[:80]}"
 
-# UniversalRouter execute(bytes commands, bytes[] inputs, uint256 deadline)
-UNIVERSAL_ROUTER_ABI = json.loads('[{"inputs":[{"internalType":"bytes","name":"commands","type":"bytes"},{"internalType":"bytes[]","name":"inputs","type":"bytes[]"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"}]')
-
-WETH_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"deposit","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"guy","type":"address"},{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]')
-
 ERC20_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]')
+
+UNIVERSAL_ROUTER_ABI = json.loads('[{"inputs":[{"internalType":"bytes","name":"commands","type":"bytes"},{"internalType":"bytes[]","name":"inputs","type":"bytes[]"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"}]')
+WETH_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"deposit","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"guy","type":"address"},{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]')
 
 
 def get_web3() -> Web3:
@@ -106,9 +112,24 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
         t_gas = (time.monotonic() - tg) * 1000
 
     base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
-    priority  = w3.to_wei(2, "gwei")
+    # Use high priority on Sepolia to ensure fast inclusion
+    priority  = w3.to_wei(5, "gwei")
+    max_fee   = base_fee * 3 + priority
+
+    # If there's a pending tx at this nonce, bump to replace it
+    confirmed_nonce = w3.eth.get_transaction_count(account.address)
+    pending_nonce   = w3.eth.get_transaction_count(account.address, "pending")
+    if pending_nonce > confirmed_nonce:
+        bump_priority = w3.to_wei(15, "gwei")
+        bump_max_fee  = base_fee * 4 + bump_priority
+        priority = max(priority, bump_priority)
+        max_fee  = max(max_fee, bump_max_fee)
+        tx_params["nonce"] = confirmed_nonce
+        print(f"   [EVM] Nonce {confirmed_nonce} pending — RBF bump: "
+              f"maxFee={w3.from_wei(max_fee, 'gwei'):.1f} gwei priority={w3.from_wei(priority, 'gwei'):.0f} gwei")
+
     tx_params["maxPriorityFeePerGas"] = priority
-    tx_params["maxFeePerGas"] = base_fee * 2 + priority
+    tx_params["maxFeePerGas"] = max_fee
 
     t_sign = time.monotonic()
     signed = account.sign_transaction(tx_params)
@@ -120,7 +141,7 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
     print(f"   [EVM] Tx sent: {tx_hash.hex()}")
 
     t_mine = time.monotonic()
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=600)
     t_mine = (time.monotonic() - t_mine) * 1000
 
     if receipt.status != 1:
@@ -185,8 +206,13 @@ def zk_withdraw_from_vault(
     if "error" in _resp:
         _err_data = _resp["error"].get("data", "")
         _raw = bytes.fromhex(_err_data[2:]) if isinstance(_err_data, str) and _err_data.startswith("0x") else b""
-        print(f"   [EVM] ❌ eth_call revert: {decode_revert(_raw)} | raw: {_resp['error']}")
-        raise RuntimeError(f"withdraw() would revert: {decode_revert(_raw)}")
+        _reason = decode_revert(_raw)
+        print(f"   [EVM] ❌ eth_call revert: {_reason} | raw: {_resp['error']}")
+        # Fatal errors — retrying will never succeed
+        _fatal_errors = {"NullifierAlreadySpent()", "InvalidZKProof()", "ZeroAddress()", "InvalidWithdrawalAmount()"}
+        if any(e in _reason for e in _fatal_errors):
+            raise FatalExecutionError(f"withdraw() would revert: {_reason}")
+        raise RuntimeError(f"withdraw() would revert: {_reason}")
     else:
         print(f"   [EVM] ✅ eth_call dry-run OK ({t_dryrun:.0f}ms)")
 
@@ -207,6 +233,9 @@ def zk_withdraw_from_vault(
     return send_tx(w3, account, tx, label="zk_withdraw")
 
 
+
+
+
 def swap_eth_to_token(
     w3: Web3,
     account,
@@ -215,11 +244,7 @@ def swap_eth_to_token(
     recipient: str,
     fee_tier: int = 3000,
 ) -> str:
-    """
-    ETH → token swap via Uniswap UniversalRouter (V3_SWAP_EXACT_IN, command=0x00).
-    Sends ETH as msg.value; router wraps internally via WRAP_ETH (command=0x0b) then swaps.
-    Two-command sequence: WRAP_ETH + V3_SWAP_EXACT_IN, all in one execute() call.
-    """
+    """ETH → token via Uniswap UniversalRouter: WRAP_ETH + V3_SWAP_EXACT_IN."""
     from eth_abi import encode as _abi_encode
     print(f"   [EVM] Swapping {amount_wei} wei ETH → {token_out_address} via UniversalRouter")
 
@@ -228,18 +253,14 @@ def swap_eth_to_token(
         abi=UNIVERSAL_ROUTER_ABI,
     )
 
-    # UniversalRouter commands (each byte = one command):
-    # 0x0b = WRAP_ETH  (wraps msg.value into WETH, sends to router address = 0x01 recipient)
-    # 0x00 = V3_SWAP_EXACT_IN
+    # 0x0b = WRAP_ETH, 0x00 = V3_SWAP_EXACT_IN
     commands = bytes([0x0b, 0x00])
 
-    # WRAP_ETH input: (address recipient, uint256 amountMin)
-    # recipient = 0x0000000000000000000000000000000000000002 (MSG_SENDER constant in UR = router itself)
-    ROUTER_ADDR = int(Web3.to_checksum_address(UNISWAP_V3_ROUTER), 16)
-    wrap_input = _abi_encode(["address", "uint256"], [Web3.to_checksum_address(UNISWAP_V3_ROUTER), amount_wei])
+    wrap_input = _abi_encode(
+        ["address", "uint256"],
+        [Web3.to_checksum_address(UNISWAP_V3_ROUTER), amount_wei],
+    )
 
-    # V3_SWAP_EXACT_IN input: (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
-    # path = tokenIn (3 bytes fee) tokenOut, packed
     path = (
         bytes.fromhex(Web3.to_checksum_address(WETH_ADDRESS)[2:])
         + fee_tier.to_bytes(3, "big")
@@ -247,15 +268,13 @@ def swap_eth_to_token(
     )
     swap_input = _abi_encode(
         ["address", "uint256", "uint256", "bytes", "bool"],
-        [Web3.to_checksum_address(recipient), amount_wei, 0, path, False]
+        [Web3.to_checksum_address(recipient), amount_wei, 0, path, False],
     )
-
-    deadline = int(time.time()) + 300
 
     tx = router.functions.execute(
         commands,
         [wrap_input, swap_input],
-        deadline,
+        int(time.time()) + 300,
     ).build_transaction({
         "from":  account.address,
         "value": amount_wei,
@@ -317,7 +336,12 @@ def execute_evm_trade(strategy: dict, current_price: float) -> str | None:
             print(f"   [EVM] ❌ Invalid amount: {amount}")
             return None
 
-        # Step 1: ZK withdraw from vault (if proof provided)
+        to_chain   = strategy.get('to_chain', '11155111')
+        from_chain = strategy.get('from_chain', '11155111')
+        is_cross_chain = str(to_chain) != str(from_chain)
+
+        # Step 1: ZK withdraw from vault to executor wallet
+        zk_tx = None
         if zkp_data:
             zk = zkp_data if isinstance(zkp_data, dict) else json.loads(zkp_data)
             if zk.get("pA") and zk.get("stateRoot"):
@@ -328,14 +352,12 @@ def execute_evm_trade(strategy: dict, current_price: float) -> str | None:
                 proof = None
 
             if proof:
-                asset_address = NATIVE_ASSET if asset_in == "ETH" else SEPOLIA_TOKENS.get(asset_in, "")
-                needs_swap = asset_in != asset_out
-                withdraw_to = account.address if needs_swap else recipient
+                asset_address = NATIVE_ASSET if asset_in == "ETH" else SEPOLIA_TOKENS.get(asset_in, asset_in)
                 t_zk = time.monotonic()
                 zk_tx = zk_withdraw_from_vault(
                     w3, account,
                     asset_address,
-                    withdraw_to,
+                    account.address,  # withdraw to executor, swap/bridge handles final delivery
                     amount_wei,
                     proof,
                 )
@@ -346,17 +368,37 @@ def execute_evm_trade(strategy: dict, current_price: float) -> str | None:
         else:
             print("   [EVM] ℹ️  No zkp_data — executing direct from executor wallet")
 
-        # Step 2: swap or direct transfer
-        if asset_in == asset_out:
-            tx_hash = zk_tx
-        else:
-            token_out_address = SEPOLIA_TOKENS.get(asset_out)
-            if not token_out_address:
-                print(f"   [EVM] ❌ Unknown output token: {asset_out}")
-                return None
-            t_swap = time.monotonic()
-            tx_hash = swap_eth_to_token(w3, account, token_out_address, amount_wei, recipient)
-            print(f"   [Benchmark] [swap_total]             = {(time.monotonic()-t_swap)*1000:.0f}ms")
+        # Step 2: cross-chain → Li.Fi; same-chain swap → Uniswap; same asset → direct transfer
+        t_swap = time.monotonic()
+        try:
+            if is_cross_chain:
+                from_token = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" if asset_in == "ETH" else SEPOLIA_TOKENS.get(asset_in, asset_in)
+                to_token   = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" if asset_out == "ETH" else SEPOLIA_TOKENS.get(asset_out, asset_out)
+                from lifi_executor import execute_lifi_swap
+                tx_hash = execute_lifi_swap(
+                    from_chain=str(from_chain),
+                    to_chain=str(to_chain),
+                    from_token=from_token,
+                    to_token=to_token,
+                    from_amount_wei=amount_wei,
+                    recipient=recipient,
+                )
+                print(f"   [Benchmark] [lifi_swap_total]             = {(time.monotonic()-t_swap)*1000:.0f}ms")
+            elif asset_in == "ETH" and asset_out != "ETH":
+                token_out_address = SEPOLIA_TOKENS.get(asset_out, asset_out)
+                tx_hash = swap_eth_to_token(w3, account, token_out_address, amount_wei, recipient)
+                print(f"   [Benchmark] [uniswap_swap_total]          = {(time.monotonic()-t_swap)*1000:.0f}ms")
+            else:
+                tx_hash = transfer_eth(w3, account, recipient, amount_wei)
+                print(f"   [Benchmark] [direct_transfer_total]       = {(time.monotonic()-t_swap)*1000:.0f}ms")
+        except Exception as swap_err:
+            if zk_tx:
+                # Nullifier is spent on-chain — mark fatal so scheduler doesn't retry with same nullifier
+                raise NullifierSpentSwapFailed(
+                    f"ZK withdraw confirmed ({zk_tx}) but swap failed: {swap_err}. "
+                    f"Funds ({amount_wei} wei) are in executor wallet {account.address}."
+                ) from swap_err
+            raise
 
         print(f"   [EVM] ✅ Done: {tx_hash}")
         print("="*60)
