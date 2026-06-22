@@ -2,9 +2,10 @@
 
 This folder contains the **off-chain services** that power encrypted strategy creation and evaluation for Siphon Money:
 
-- **Payload Generator** (`siphon-payload-generator-demo`, Rust/Axum): generates FHE keys, encrypts strategy bounds, and forwards an encrypted payload.
-- **Trade Executor** (`trade-executor`, Python/Flask): stores encrypted strategies, polls the oracle, orchestrates evaluation, and triggers on-chain execution.
-- **FHE Engine** (`fhe`, Rust/Axum + tfhe-rs): performs homomorphic comparisons and returns whether a strategy is triggered.
+- **Browser FHE (`siphon-app/fhe-wasm`, Rust→WASM + tfhe-rs)**: generates the user's FHE keypair, encrypts strategy bounds, and decrypts results — all in the browser. The client (secret) key never leaves the device.
+- **Trade Executor** (`trade-executor`, Python/Flask): stores encrypted strategies + the per-user server key, polls the oracle, asks the engine to compute the encrypted result, and runs browser-authorized on-chain execution.
+- **FHE Engine** (`fhe`, Rust/Axum + tfhe-rs): performs homomorphic comparisons and returns the **encrypted** trigger result (it can no longer decrypt — it has no client key).
+- **Payload Generator** (`siphon-payload-generator-demo`): **deprecated**, replaced by browser FHE. Kept for reference only.
 
 ---
 
@@ -20,21 +21,14 @@ This folder contains the **off-chain services** that power encrypted strategy cr
 
 ### Data flow
 
-1. **User enters plaintext** strategy parameters in the frontend (upper/lower bounds, amounts, recipient, ZK payload).
-2. Frontend calls **Payload Generator** (`/generatePayload`).
-3. Payload Generator:
-   - Generates FHE keys.
-   - Encrypts bounds and constructs an **encrypted payload**.
-   - Forwards the encrypted payload to **Trade Executor** (`/createStrategy`).
-4. Trade Executor:
-   - Persists the strategy (encrypted fields stored in SQLite).
-   - A background **scheduler** periodically fetches prices from Pyth Hermes.
-   - For each pending strategy, calls **FHE Engine** (`/evaluateStrategy`) with ciphertext + current price.
-5. FHE Engine:
-   - Runs the homomorphic comparison.
-   - Decrypts the comparison result.
-   - Returns `{ "is_triggered": true|false }`.
-6. If triggered, Trade Executor performs the **on-chain execution** on Solana.
+1. **Browser** generates the FHE keypair (once, ~3s), stores the client key locally (IndexedDB), and uploads the server key once via `POST /uploadServerKey`.
+2. User enters strategy parameters. The **browser encrypts the bounds locally** and posts ciphertext (no keys) to **Trade Executor** (`/createStrategy`). Plaintext bounds and the client key never leave the device.
+3. Trade Executor persists the strategy. A background **scheduler** fetches prices from Pyth Hermes and, for each pending strategy, calls **FHE Engine** (`/evaluateStrategy` or `/evaluateTree`) with ciphertext + current price.
+4. FHE Engine runs the homomorphic comparison and returns the **encrypted result** (it cannot decrypt). Trade Executor stores it and marks the strategy `ARMED`.
+5. The **browser polls** the encrypted result, **decrypts it locally**, and if triggered calls `POST /executeStrategy`.
+6. Trade Executor performs the **on-chain execution** on Solana.
+
+> **Trade-off:** because the client key stays in the browser, the trigger is only acted on while the user's browser is open (browser-in-the-loop). The server never learns the bounds or the trigger bit.
 
 ---
 

@@ -70,13 +70,19 @@ class Strategy(db.Model):
     price_feed_id = db.Column(db.String, nullable=True)
     recipient_address = db.Column(db.String, nullable=False)
     
-    # Compressed and encrypted sensitive fields (FHE keys)
-    server_key = db.Column(CompressedEncryptedText, nullable=False)
-    encrypted_client_key = db.Column(CompressedEncryptedText, nullable=False)  # Required for decryption
-    
+    # FHE keys are no longer stored per-strategy. The client key NEVER leaves the user's
+    # browser; the (large) server key is stored once per user in UserFheKey and looked up
+    # by user_id at evaluation time.
+
     # Compressed but not encrypted (FHE ciphertexts - already encrypted by FHE)
     encrypted_upper_bound = db.Column(CompressedText, nullable=True)
     encrypted_lower_bound = db.Column(CompressedText, nullable=True)
+
+    # Latest encrypted evaluation result (hex of a RadixCiphertext, 1=triggered/0=not),
+    # refreshed by the scheduler against the current price. The browser polls and decrypts
+    # this locally to decide whether to authorize execution.
+    encrypted_result = db.Column(CompressedText, nullable=True)
+    result_updated_at = db.Column(DateTime, nullable=True)
     
     # Compressed JSON fields
     zkp_data = db.Column(CompressedText, nullable=True)
@@ -110,10 +116,10 @@ class Strategy(db.Model):
             'amount': self.amount,
             'price_feed_id': self.price_feed_id,
             'recipient_address': self.recipient_address,
-            'server_key': self.server_key,
-            'encrypted_client_key': self.encrypted_client_key,
             'encrypted_upper_bound': self.encrypted_upper_bound,
             'encrypted_lower_bound': self.encrypted_lower_bound,
+            'encrypted_result': self.encrypted_result,
+            'result_updated_at': self.result_updated_at.isoformat() if self.result_updated_at else None,
             'zkp_data': json.loads(self.zkp_data) if self.zkp_data and isinstance(self.zkp_data, str) else self.zkp_data,
             'status': self.status,
             'tx_hash': self.tx_hash,
@@ -154,3 +160,20 @@ class Note(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
+
+class UserFheKey(db.Model):
+    """Per-user FHE public (server) key. Generated in the user's browser and uploaded once.
+    The server key is large (~100 MB) and identical across all of a user's strategies, so it
+    is stored here once rather than duplicated per strategy. The client (secret) key is never
+    uploaded — it stays in the browser."""
+    __tablename__ = 'user_fhe_keys'
+    user_id    = db.Column(db.String, primary_key=True)
+    server_key = db.Column(CompressedText, nullable=False)  # hex, compressed at rest
+    created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+def get_server_key(user_id):
+    """Look up a user's stored FHE server key (hex), or None if not uploaded yet."""
+    row = UserFheKey.query.get(user_id)
+    return row.server_key if row else None

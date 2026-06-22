@@ -1,31 +1,13 @@
 35.177.18.115.sslip.io {
-    # Payload Generator
-    handle /generatePayload* {
-        reverse_proxy payload-generator:5009
-    }
-    
-    # Trade Executor
-    handle /createStrategy* {
-        reverse_proxy trade-executor:5005
-    }
-    handle /health* {
-        reverse_proxy trade-executor:5005
-    }
-    handle /strategies* {
-        reverse_proxy trade-executor:5005
-    }
-    
-    handle /strategies* {
-        reverse_proxy trade-executor:5005
-    }
-
     # Proving Relayer
     handle /prove* {
         reverse_proxy proving-relayer:5010
     }
-    
-    # Default to payload generator
+
+    # Everything else → Trade Executor (createStrategy, strategies, uploadServerKey,
+    # hasServerKey, strategy/<id>/result, executeStrategy, health, notes, ...).
+    # The payload generator is deprecated — encryption now happens in the browser.
     handle {
-        reverse_proxy payload-generator:5009
+        reverse_proxy trade-executor:5005
     }
 }

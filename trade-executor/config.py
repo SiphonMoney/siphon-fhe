@@ -34,6 +34,7 @@ EXECUTOR_PRIVATE_KEY = os.getenv("EXECUTOR_PRIVATE_KEY")
 # --- FHE Engine URLs ---
 FHE_ENGINE_URL = os.getenv("FHE_ENGINE_URL", "http://localhost:5001/evaluateStrategy")
 FHE_ENGINE_CONDITION_URL = os.getenv("FHE_ENGINE_CONDITION_URL", "http://localhost:5001/evaluateCondition")
+FHE_ENGINE_TREE_URL = os.getenv("FHE_ENGINE_TREE_URL", "http://localhost:5001/evaluateTree")
 FHE_ENGINE_BRACKET_URL = os.getenv("FHE_ENGINE_BRACKET_URL", "http://localhost:5001/evaluate_bracket_order")
 FHE_ENGINE_LIMIT_BUY_URL = os.getenv("FHE_ENGINE_LIMIT_BUY_URL", "http://localhost:5001/evaluate_limit_buy")
 FHE_ENGINE_LIMIT_SELL_URL = os.getenv("FHE_ENGINE_LIMIT_SELL_URL", "http://localhost:5001/evaluate_limit_sell")

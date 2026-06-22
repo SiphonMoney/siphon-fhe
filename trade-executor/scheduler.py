@@ -1,181 +1,97 @@
 import time
 from datetime import datetime
-from database import db, Strategy
+from database import db, Strategy, get_server_key
 from oracle import get_live_prices
-from fhe_client import is_condition_met
-from trade_executor import execute_trade, execute_private_withdrawal
-from evm_executor import FatalExecutionError, NullifierSpentSwapFailed
+from fhe_client import get_encrypted_result
+from condition_evaluator import evaluate_tree_encrypted
 from config import CHECK_INTERVAL_SECONDS, PYTH_PRICE_FEED_IDS
+
+# With client-side FHE keys the scheduler can no longer decrypt the trigger bit, so it no
+# longer auto-executes. Instead it "arms" each strategy: it asks the FHE engine to compute the
+# encrypted result against the latest price and stores that ciphertext. The user's browser
+# polls the result, decrypts it locally, and authorizes execution via POST /executeStrategy.
+
+
+def _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price):
+    asset_in = strategy_dict.get('asset_in', 'ETH').upper()
+    price_feed_id = strategy_dict.get('price_feed_id') or PYTH_PRICE_FEED_IDS.get(asset_in)
+    if price_feed_id and price_feed_id in live_prices:
+        return live_prices[price_feed_id]
+    if eth_feed_id and eth_feed_id in live_prices:
+        return eth_price
+    return sol_price
 
 
 def worker_loop(app):
-    print("[Scheduler] Starting worker loop")
+    print("[Scheduler] Starting worker loop (arming mode — browser decrypts & authorizes)")
 
     while True:
         try:
             with app.app_context():
-                pending_strategies = Strategy.query.filter_by(status='PENDING').all()
+                # Process strategies awaiting a trigger. ARMED ones are refreshed each cycle
+                # so the browser always sees a result reflecting the current price.
+                pending = Strategy.query.filter(Strategy.status.in_(['PENDING', 'ARMED'])).all()
 
-                if not pending_strategies:
+                if not pending:
                     time.sleep(CHECK_INTERVAL_SECONDS)
                     continue
 
-                strategies_to_process = [s.to_dict() for s in pending_strategies]
+                strategies_to_process = [s.to_dict() for s in pending]
 
-                # Fetch prices for all supported assets
                 feed_ids = [fid for fid in PYTH_PRICE_FEED_IDS.values() if fid]
                 live_prices = get_live_prices(feed_ids)
-
-                eth_feed_id = PYTH_PRICE_FEED_IDS.get("ETH")
-                sol_feed_id = PYTH_PRICE_FEED_IDS.get("SOL")
-
                 if not live_prices:
                     print("[Scheduler] Warning: No prices from oracle this cycle. Retrying.")
                     time.sleep(CHECK_INTERVAL_SECONDS)
                     continue
 
+                eth_feed_id = PYTH_PRICE_FEED_IDS.get("ETH")
+                sol_feed_id = PYTH_PRICE_FEED_IDS.get("SOL")
                 eth_price = live_prices.get(eth_feed_id, 0)
                 sol_price = live_prices.get(sol_feed_id, 0)
-                print(f"[Scheduler] Processing {len(strategies_to_process)} strategies. "
+                print(f"[Scheduler] Arming {len(strategies_to_process)} strategies. "
                       f"ETH=${eth_price:,.2f} SOL=${sol_price:,.2f}")
 
+                # Cache server keys per user to avoid repeated (large) lookups within a cycle.
+                server_keys = {}
+
                 for strategy_dict in strategies_to_process:
+                    sid = strategy_dict.get('id')
                     try:
-                        asset_in = strategy_dict.get('asset_in', 'ETH').upper()
-                        price_feed_id = strategy_dict.get('price_feed_id') or PYTH_PRICE_FEED_IDS.get(asset_in)
+                        user_id = strategy_dict.get('user_id')
+                        server_key = server_keys.get(user_id)
+                        if server_key is None:
+                            server_key = get_server_key(user_id)
+                            server_keys[user_id] = server_key
+                        if not server_key:
+                            print(f"[Scheduler] ⚠️ No server key for user {user_id}; skipping {sid}")
+                            continue
 
-                        if price_feed_id and price_feed_id in live_prices:
-                            current_price = live_prices[price_feed_id]
-                        elif eth_feed_id and eth_feed_id in live_prices:
-                            current_price = eth_price
-                        else:
-                            current_price = sol_price
-
-                        sid = strategy_dict.get('id')
-
-                        # ── 1. FHE evaluation ──────────────────────────────────
-                        condition_tree = strategy_dict.get('condition_tree')
+                        current_price = _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price)
 
                         t_fhe = time.monotonic()
+                        condition_tree = strategy_dict.get('condition_tree')
                         if condition_tree:
-                            # New-style: recursive condition tree
-                            from condition_evaluator import evaluate_tree
-                            triggered = evaluate_tree(condition_tree, live_prices, strategy_dict)
+                            enc_result = evaluate_tree_encrypted(condition_tree, live_prices, server_key)
                         else:
-                            # Legacy: single-asset FHE evaluation
-                            triggered = is_condition_met(strategy_dict, current_price)
+                            enc_result = get_encrypted_result(strategy_dict, current_price, server_key)
                         fhe_ms = (time.monotonic() - t_fhe) * 1000
 
-                        print(f"[Benchmark] strategy={sid}")
-                        print(f"[Benchmark]   fhe_evaluation      = {fhe_ms:>8.1f} ms")
-                        print(f"[Scheduler] Strategy {sid} | "
-                              f"price={current_price:.2f} | fhe_check={fhe_ms:.0f}ms | triggered={triggered}")
+                        if not enc_result:
+                            print(f"[Scheduler] ⚠️ No encrypted result for {sid} this cycle")
+                            continue
 
-                        if triggered:
-                            is_private = strategy_dict.get('is_private', False)
-
-                            # ── 2. Mark nullifier pending to block double-spend during execution
-                            _note_for_exec = None
-                            try:
-                                import json as _json
-                                zkp = strategy_dict.get('zkp_data')
-                                if zkp:
-                                    zk = zkp if isinstance(zkp, dict) else _json.loads(zkp)
-                                    _nullifier_hash = str(zk.get('nullifierHash', ''))
-                                    if _nullifier_hash:
-                                        from database import Note
-                                        _note_for_exec = Note.query.filter_by(nullifier_hash=_nullifier_hash).first()
-                                        if _note_for_exec:
-                                            _note_for_exec.spent = 'pending'
-                                            db.session.commit()
-                                            print(f"[Scheduler] Note {_nullifier_hash[:16]}... marked spent=pending")
-                            except Exception as _ne:
-                                print(f"[Scheduler] ⚠️ Could not mark note pending: {_ne}")
-
-                            # ── 3. Total execution ─────────────────────────────
-                            t_exec = time.monotonic()
-                            try:
-                                if is_private:
-                                    tx_hash = execute_private_withdrawal(strategy_dict, current_price)
-                                else:
-                                    tx_hash = execute_trade(strategy_dict, current_price)
-                            except NullifierSpentSwapFailed as swap_fatal:
-                                exec_ms = (time.monotonic() - t_exec) * 1000
-                                print(f"[Scheduler] ⚠️  ZK withdraw confirmed but swap failed for strategy {strategy_dict.get('id')}: {swap_fatal}")
-                                strategy_to_update = Strategy.query.get(strategy_dict['id'])
-                                if strategy_to_update:
-                                    strategy_to_update.status = 'FAILED'
-                                    db.session.commit()
-                                # Nullifier IS spent on-chain — mark true so it's never reused
-                                if _note_for_exec:
-                                    try:
-                                        _note_for_exec.spent = 'true'
-                                        db.session.commit()
-                                        print(f"[Scheduler] Note marked spent=true (nullifier spent, swap failed)")
-                                    except Exception:
-                                        pass
-                                print(f"[Scheduler] Strategy {strategy_dict.get('id')} marked FAILED — funds in executor wallet.")
-                                continue
-                            except FatalExecutionError as fatal:
-                                exec_ms = (time.monotonic() - t_exec) * 1000
-                                print(f"[Scheduler] ❌ Fatal error for strategy {strategy_dict.get('id')}: {fatal}")
-                                strategy_to_update = Strategy.query.get(strategy_dict['id'])
-                                if strategy_to_update:
-                                    strategy_to_update.status = 'FAILED'
-                                    db.session.commit()
-                                # Revert note to false — nullifier not actually spent on-chain
-                                if _note_for_exec:
-                                    try:
-                                        _note_for_exec.spent = 'false'
-                                        db.session.commit()
-                                        print(f"[Scheduler] Note reverted to spent=false (fatal error)")
-                                    except Exception:
-                                        pass
-                                print(f"[Scheduler] Strategy {strategy_dict.get('id')} marked FAILED — will not retry.")
-                                continue
-
-                            exec_ms = (time.monotonic() - t_exec) * 1000
-                            print(f"[Benchmark]   total_execution     = {exec_ms:>8.1f} ms  tx={tx_hash}")
-                            print(f"[Scheduler] Execution took {exec_ms:.0f}ms | tx_hash={tx_hash}")
-
-                            if tx_hash:
-                                strategy_to_update = Strategy.query.get(strategy_dict['id'])
-                                if strategy_to_update:
-                                    strategy_to_update.status = 'EXECUTED'
-                                    strategy_to_update.tx_hash = tx_hash
-                                    strategy_to_update.executed_at = datetime.utcnow()
-                                    db.session.commit()
-                                    print(f"[Scheduler] Strategy {strategy_dict.get('id')} EXECUTED: {tx_hash}")
-
-                                # Mark the nullifier fully spent now that tx is confirmed on-chain
-                                try:
-                                    import json as _json
-                                    zkp = strategy_dict.get('zkp_data')
-                                    if zkp:
-                                        zk = zkp if isinstance(zkp, dict) else _json.loads(zkp)
-                                        nullifier_hash = str(zk.get('nullifierHash', ''))
-                                        if nullifier_hash:
-                                            from database import Note
-                                            note = Note.query.filter_by(nullifier_hash=nullifier_hash).first()
-                                            if note:
-                                                note.spent = 'true'
-                                                db.session.commit()
-                                                print(f"[Scheduler] Note {nullifier_hash[:16]}... marked spent=true")
-                                except Exception as _se:
-                                    print(f"[Scheduler] ⚠️ Could not mark note spent=true: {_se}")
-                            else:
-                                # Revert note to false — tx didn't go through, safe to retry
-                                if _note_for_exec:
-                                    try:
-                                        _note_for_exec.spent = 'false'
-                                        db.session.commit()
-                                        print(f"[Scheduler] Note reverted to spent=false (tx failed, will retry)")
-                                    except Exception:
-                                        pass
-                                print(f"[Scheduler] Strategy {strategy_dict.get('id')} execution failed, will retry.")
+                        strat = Strategy.query.get(sid)
+                        if strat:
+                            strat.encrypted_result = enc_result
+                            strat.result_updated_at = datetime.utcnow()
+                            if strat.status == 'PENDING':
+                                strat.status = 'ARMED'
+                            db.session.commit()
+                        print(f"[Scheduler] Strategy {sid} armed | price={current_price:.2f} | fhe={fhe_ms:.0f}ms")
 
                     except Exception as strategy_err:
-                        print(f"[Scheduler] Error processing strategy {strategy_dict.get('id')}: {strategy_err}")
+                        print(f"[Scheduler] Error arming strategy {sid}: {strategy_err}")
                         continue
 
         except Exception as e:

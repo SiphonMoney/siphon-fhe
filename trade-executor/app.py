@@ -3,7 +3,7 @@ from flask_cors import CORS
 import threading
 import os
 import json
-from database import db, Strategy
+from database import db, Strategy, UserFheKey, get_server_key
 from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
 from auth import rate_limit
@@ -57,6 +57,8 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
                     ("condition_tree", "TEXT"),
                     ("to_chain", "VARCHAR(20)"),
                     ("from_chain", "VARCHAR(20)"),
+                    ("encrypted_result", "BLOB"),
+                    ("result_updated_at", "DATETIME"),
                 ]:
                     try:
                         conn.execute(text(f"ALTER TABLE strategy ADD COLUMN {col} {typedef} DEFAULT ''"))
@@ -111,6 +113,11 @@ def create_strategy():
         if not valid:
             return jsonify({"error": err}), 400
 
+        # Client-side FHE: bounds are encrypted in the browser; the user's server key must have
+        # been uploaded once via /uploadServerKey. The client key never reaches us.
+        if not get_server_key(data['user_id']):
+            return jsonify({"error": "No FHE server key on file for this user. Upload it via /uploadServerKey first."}), 400
+
         # Support condition_tree (new) OR legacy upper/lower bound (old)
         condition_tree = data.get('condition_tree')
 
@@ -123,8 +130,6 @@ def create_strategy():
             recipient_address=recipient,
             encrypted_upper_bound=data.get('encrypted_upper_bound'),
             encrypted_lower_bound=data.get('encrypted_lower_bound'),
-            server_key=data.get('server_key'),
-            encrypted_client_key=data.get('encrypted_client_key'),
             zkp_data=json.dumps(data.get('zkp_data') or data.get('zk_proof')) if (data.get('zkp_data') or data.get('zk_proof')) else None,
             condition_tree=json.dumps(condition_tree) if condition_tree else None,
             to_chain=str(to_chain),
@@ -158,12 +163,109 @@ def get_user_strategies(user_id):
                 "tx_hash": s.tx_hash,
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
+                # Browser polls this and decrypts it locally with its client key.
+                "encrypted_result": s.encrypted_result,
+                "result_updated_at": s.result_updated_at.isoformat() if s.result_updated_at else None,
             } for s in strategies]
         }), 200
-        
+
     except Exception as e:
         print(f"Error fetching strategies: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/uploadServerKey', methods=['POST'])
+@rate_limit(max_requests=20, window_seconds=60)
+def upload_server_key():
+    """Store a user's FHE server (public) key once. Idempotent upsert.
+
+    The server key is large (~100 MB hex) but identical across all of a user's strategies, so
+    it is uploaded a single time and reused. The client (secret) key is never uploaded."""
+    data = request.json
+    if not data or not data.get('user_id') or not data.get('server_key'):
+        return jsonify({"error": "user_id and server_key are required"}), 400
+    try:
+        existing = UserFheKey.query.get(data['user_id'])
+        if existing:
+            existing.server_key = data['server_key']
+        else:
+            db.session.add(UserFheKey(user_id=data['user_id'], server_key=data['server_key']))
+        db.session.commit()
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error storing server key: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/hasServerKey/<user_id>', methods=['GET'])
+def has_server_key(user_id):
+    """Lets the browser know whether it still needs to upload its server key."""
+    return jsonify({"has_key": get_server_key(user_id) is not None}), 200
+
+
+@app.route('/strategy/<strategy_id>/result', methods=['GET'])
+def get_strategy_result(strategy_id):
+    """Return the latest encrypted evaluation result for a strategy. The browser decrypts it
+    locally to decide whether to authorize execution."""
+    s = Strategy.query.get(strategy_id)
+    if not s:
+        return jsonify({"error": "strategy not found"}), 404
+    return jsonify({
+        "status": s.status,
+        "encrypted_result": s.encrypted_result,
+        "result_updated_at": s.result_updated_at.isoformat() if s.result_updated_at else None,
+    }), 200
+
+
+@app.route('/executeStrategy', methods=['POST'])
+@rate_limit(max_requests=30, window_seconds=60)
+def execute_strategy_endpoint():
+    """Browser-authorized execution. After the browser decrypts the result and sees it is
+    triggered, it calls this to run the on-chain trade. We fetch a fresh price and execute."""
+    from oracle import get_live_prices
+    from executor_runner import run_execution
+
+    data = request.json or {}
+    strategy_id = data.get('strategy_id')
+    user_id = data.get('user_id')
+    if not strategy_id or not user_id:
+        return jsonify({"error": "strategy_id and user_id are required"}), 400
+
+    s = Strategy.query.get(strategy_id)
+    if not s:
+        return jsonify({"error": "strategy not found"}), 404
+    if s.user_id != user_id:
+        return jsonify({"error": "not authorized for this strategy"}), 403
+    if s.status in ('EXECUTED',):
+        return jsonify({"status": "already_executed", "tx_hash": s.tx_hash}), 200
+    if s.status not in ('PENDING', 'ARMED'):
+        return jsonify({"error": f"strategy not executable (status={s.status})"}), 409
+
+    strategy_dict = s.to_dict()
+
+    # Fresh price using the same selection logic as the scheduler.
+    feed_ids = [fid for fid in PYTH_PRICE_FEED_IDS.values() if fid]
+    live_prices = get_live_prices(feed_ids)
+    eth_feed_id = PYTH_PRICE_FEED_IDS.get("ETH")
+    sol_feed_id = PYTH_PRICE_FEED_IDS.get("SOL")
+    asset_in = strategy_dict.get('asset_in', 'ETH').upper()
+    feed = strategy_dict.get('price_feed_id') or PYTH_PRICE_FEED_IDS.get(asset_in)
+    if feed and feed in live_prices:
+        current_price = live_prices[feed]
+    elif eth_feed_id in live_prices:
+        current_price = live_prices.get(eth_feed_id, 0)
+    else:
+        current_price = live_prices.get(sol_feed_id, 0)
+
+    try:
+        result = run_execution(strategy_dict, current_price)
+        return jsonify({"status": "success", **result}), 200
+    except Exception as e:
+        print(f"Error executing strategy {strategy_id}: {e}")
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(port=5005, debug=False)

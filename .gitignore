@@ -1,5 +1,37 @@
-cargo.lock
+# Rust (fhe/, siphon-payload-generator-demo/)
 target/
-__pycache__
-instance
+Cargo.lock
+
+# Python (trade-executor/)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Trade-executor runtime data
+instance/
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Node (trade-executor has package.json)
+node_modules/
+
+# Environment / secrets
 .env
+.env.*
+!.env.prod.template
+
+# Logs
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

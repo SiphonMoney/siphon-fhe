@@ -1,7 +1,14 @@
 use axum::{http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
-use tfhe::integer::{RadixClientKey, RadixCiphertext, ServerKey};
+use serde_json::Value;
+use std::collections::HashMap;
+use tfhe::integer::{RadixCiphertext, ServerKey};
 use crate::fhe_engine::core as fhe_core;
+
+// ── Wire format ────────────────────────────────────────────────────────────────
+// The engine no longer holds the client key and no longer decrypts. It returns the
+// *encrypted* trigger result (hex of a RadixCiphertext encoding 1=triggered / 0=not).
+// The browser decrypts it locally with its client key, which never leaves the device.
 
 #[derive(Deserialize)]
 pub struct EvaluationPayload {
@@ -10,14 +17,24 @@ pub struct EvaluationPayload {
     encrypted_lower_bound: String,
     server_key: String,
     current_price_cents: u64,  // u64 — u32 overflows at ~$42k (BTC/ETH prices)
-    encrypted_client_key: String,
 }
 
 #[derive(Serialize)]
 pub struct EvaluationResponse {
-    is_triggered: bool,
+    /// Hex of the result RadixCiphertext (1=triggered, 0=not). None on error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+impl EvaluationResponse {
+    fn ok(encrypted_result: String) -> Self {
+        Self { encrypted_result: Some(encrypted_result), error: None }
+    }
+    fn err(msg: String) -> Self {
+        Self { encrypted_result: None, error: Some(msg) }
+    }
 }
 
 fn deserialize_hex<T: for<'de> serde::Deserialize<'de>>(hex_str: &str, label: &str) -> Result<T, String> {
@@ -27,9 +44,15 @@ fn deserialize_hex<T: for<'de> serde::Deserialize<'de>>(hex_str: &str, label: &s
         .map_err(|e| format!("bincode deserialize failed for {}: {}", label, e))
 }
 
-fn decrypt_result(encrypted_result: &RadixCiphertext, client_key_hex: &str) -> Result<bool, String> {
-    let client_key: RadixClientKey = deserialize_hex(client_key_hex, "client_key")?;
-    Ok(client_key.decrypt::<u64>(encrypted_result) == 1)
+fn serialize_hex(ct: &RadixCiphertext) -> Result<String, String> {
+    bincode::serialize(ct)
+        .map(hex::encode)
+        .map_err(|e| format!("bincode serialize failed for result: {}", e))
+}
+
+/// Convenience: build an error tuple.
+fn bad(code: StatusCode, msg: String) -> (StatusCode, Json<EvaluationResponse>) {
+    (code, Json(EvaluationResponse::err(msg)))
 }
 
 pub async fn evaluate_strategy(
@@ -40,10 +63,7 @@ pub async fn evaluate_strategy(
 
     let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
         Ok(k) => k,
-        Err(e) => {
-            println!("[FHE Engine] ❌ {}", e);
-            return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) }));
-        }
+        Err(e) => return bad(StatusCode::BAD_REQUEST, e),
     };
 
     let price = payload.current_price_cents;
@@ -51,51 +71,48 @@ pub async fn evaluate_strategy(
     let encrypted_result = match payload.strategy_type.as_str() {
         "LIMIT_ORDER" | "BRACKET_ORDER_SHORT" => {
             let enc_upper: RadixCiphertext = match deserialize_hex(&payload.encrypted_upper_bound, "upper_bound") {
-                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::BAD_REQUEST, e),
             };
             let enc_lower: RadixCiphertext = match deserialize_hex(&payload.encrypted_lower_bound, "lower_bound") {
-                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::BAD_REQUEST, e),
             };
             let is_above = match fhe_core::homomorphic_check(&server_key, &enc_upper, "GTE", price) {
-                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, e),
             };
             let is_below = match fhe_core::homomorphic_check(&server_key, &enc_lower, "LTE", price) {
-                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, e),
             };
             fhe_core::homomorphic_or(&server_key, &is_above, &is_below)
         },
         "LIMIT_BUY_DIP" => {
             let enc_lower: RadixCiphertext = match deserialize_hex(&payload.encrypted_lower_bound, "lower_bound") {
-                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::BAD_REQUEST, e),
             };
             match fhe_core::homomorphic_check(&server_key, &enc_lower, "LTE", price) {
-                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, e),
             }
         },
         "LIMIT_SELL_RALLY" => {
             let enc_upper: RadixCiphertext = match deserialize_hex(&payload.encrypted_upper_bound, "upper_bound") {
-                Ok(v) => v, Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::BAD_REQUEST, e),
             };
             match fhe_core::homomorphic_check(&server_key, &enc_upper, "GTE", price) {
-                Ok(v) => v, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+                Ok(v) => v, Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, e),
             }
         },
         _ => {
             let msg = format!("Unknown strategy_type '{}'", payload.strategy_type);
             println!("[FHE Engine] ❌ {}", msg);
-            return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(msg) }));
+            return bad(StatusCode::BAD_REQUEST, msg);
         }
     };
 
-    match decrypt_result(&encrypted_result, &payload.encrypted_client_key) {
-        Ok(is_triggered) => {
-            println!("[FHE Engine] ✅ Evaluation complete. is_triggered={}", is_triggered);
-            (StatusCode::OK, Json(EvaluationResponse { is_triggered, error: None }))
+    match serialize_hex(&encrypted_result) {
+        Ok(hex) => {
+            println!("[FHE Engine] ✅ Evaluation complete, returning encrypted result ({} hex chars)", hex.len());
+            (StatusCode::OK, Json(EvaluationResponse::ok(hex)))
         },
-        Err(e) => {
-            println!("[FHE Engine] ❌ Decrypt failed: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) }))
-        }
+        Err(e) => bad(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -105,7 +122,6 @@ pub struct ConditionPayload {
     condition: String,          // "GTE" or "LTE"
     current_price_cents: u64,
     server_key: String,
-    encrypted_client_key: String,
 }
 
 pub async fn evaluate_condition(
@@ -116,26 +132,103 @@ pub async fn evaluate_condition(
 
     let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
         Ok(k) => k,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+        Err(e) => return bad(StatusCode::BAD_REQUEST, e),
     };
 
     let enc_bound: RadixCiphertext = match deserialize_hex(&payload.encrypted_bound, "encrypted_bound") {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+        Err(e) => return bad(StatusCode::BAD_REQUEST, e),
     };
 
     let result = match fhe_core::homomorphic_check(
         &server_key, &enc_bound, &payload.condition, payload.current_price_cents
     ) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+        Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
-    match decrypt_result(&result, &payload.encrypted_client_key) {
-        Ok(is_triggered) => {
-            println!("[FHE Engine] ✅ evaluateCondition result: {}", is_triggered);
-            (StatusCode::OK, Json(EvaluationResponse { is_triggered, error: None }))
-        },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(EvaluationResponse { is_triggered: false, error: Some(e) })),
+    match serialize_hex(&result) {
+        Ok(hex) => (StatusCode::OK, Json(EvaluationResponse::ok(hex))),
+        Err(e) => bad(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+// ── Condition trees ─────────────────────────────────────────────────────────────
+// Boolean composition (AND/OR/NOT) used to happen in Python over plaintext booleans.
+// Now that results are encrypted, the whole tree must be folded homomorphically here.
+
+#[derive(Deserialize)]
+pub struct TreePayload {
+    tree: Value,
+    server_key: String,
+    /// price_feed_id -> current price in cents
+    prices: HashMap<String, u64>,
+}
+
+fn eval_tree_node(
+    sks: &ServerKey,
+    node: &Value,
+    prices: &HashMap<String, u64>,
+) -> Result<RadixCiphertext, String> {
+    let op = node.get("op").and_then(|v| v.as_str())
+        .ok_or_else(|| "tree node missing 'op'".to_string())?;
+
+    match op {
+        "LEAF" => {
+            let bound_hex = node.get("encrypted_bound").and_then(|v| v.as_str())
+                .ok_or_else(|| "LEAF missing 'encrypted_bound'".to_string())?;
+            let condition = node.get("condition").and_then(|v| v.as_str())
+                .ok_or_else(|| "LEAF missing 'condition'".to_string())?;
+            let feed = node.get("price_feed_id").and_then(|v| v.as_str())
+                .ok_or_else(|| "LEAF missing 'price_feed_id'".to_string())?;
+            let price = *prices.get(feed)
+                .ok_or_else(|| format!("no price for feed '{}'", feed))?;
+            let enc_bound: RadixCiphertext = deserialize_hex(bound_hex, "encrypted_bound")?;
+            fhe_core::homomorphic_check(sks, &enc_bound, condition, price)
+        }
+        "AND" | "OR" => {
+            let children = node.get("conditions").and_then(|v| v.as_array())
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| format!("{} node has no 'conditions'", op))?;
+            let mut acc = eval_tree_node(sks, &children[0], prices)?;
+            for child in &children[1..] {
+                let next = eval_tree_node(sks, child, prices)?;
+                acc = if op == "AND" {
+                    fhe_core::homomorphic_and(sks, &acc, &next)
+                } else {
+                    fhe_core::homomorphic_or(sks, &acc, &next)
+                };
+            }
+            Ok(acc)
+        }
+        "NOT" => {
+            let children = node.get("conditions").and_then(|v| v.as_array())
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| "NOT node has no 'conditions'".to_string())?;
+            let inner = eval_tree_node(sks, &children[0], prices)?;
+            Ok(fhe_core::homomorphic_not(sks, &inner))
+        }
+        other => Err(format!("unknown tree op '{}'", other)),
+    }
+}
+
+pub async fn evaluate_tree(
+    Json(payload): Json<TreePayload>,
+) -> (StatusCode, Json<EvaluationResponse>) {
+    println!("[FHE Engine] evaluateTree with {} price feeds", payload.prices.len());
+
+    let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
+        Ok(k) => k,
+        Err(e) => return bad(StatusCode::BAD_REQUEST, e),
+    };
+
+    let result = match eval_tree_node(&server_key, &payload.tree, &payload.prices) {
+        Ok(v) => v,
+        Err(e) => return bad(StatusCode::BAD_REQUEST, e),
+    };
+
+    match serialize_hex(&result) {
+        Ok(hex) => (StatusCode::OK, Json(EvaluationResponse::ok(hex))),
+        Err(e) => bad(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

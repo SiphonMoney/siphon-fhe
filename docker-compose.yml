@@ -14,7 +14,6 @@ services:
       - caddy-config:/config
     depends_on:
       - trade-executor
-      - payload-generator
     restart: unless-stopped
 
   # PostgreSQL Database
@@ -68,18 +67,13 @@ services:
       - RUST_LOG=info
     restart: unless-stopped
 
-  # 3. Rust Payload Generator (The Encryptor)
-  payload-generator:
-    build: ./siphon-payload-generator-demo
-    container_name: siphon-payload-generator
-    ports:
-      - "5009:5009"
-    environment:
-      - RUST_LOG=info
-      - ORCHESTRATOR_URL=http://trade-executor:5005/createStrategy
-    depends_on:
-      - trade-executor
-    restart: unless-stopped
+  # 3. Rust Payload Generator — DEPRECATED.
+  # Encryption now happens in the browser (siphon-app/fhe-wasm). The client generates FHE keys,
+  # encrypts bounds locally, and uploads only the server key + ciphertext. This service is no
+  # longer in the data path and is intentionally not started. See siphon-payload-generator-demo/README.md.
+  # payload-generator:
+  #   build: ./siphon-payload-generator-demo
+  #   ...
 
   # 4. Proving Relayer (ZK proof generation)
   proving-relayer:

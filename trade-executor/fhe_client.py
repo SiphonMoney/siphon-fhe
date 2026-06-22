@@ -1,47 +1,51 @@
 import requests
-import os
-from config import FHE_ENGINE_URL, FHE_ENGINE_CONDITION_URL
+from config import FHE_ENGINE_URL, FHE_ENGINE_TREE_URL
 
-def is_condition_met(strategy, current_price):
-    print(f"   -> [FHE Client] Consulting Rust FHE Engine for strategy '{strategy['id']}'...")
+# The FHE engine no longer decrypts. These helpers return the *encrypted* result ciphertext
+# (hex) that the scheduler stores on the strategy; the user's browser decrypts it locally.
+
+
+def get_encrypted_result(strategy, current_price, server_key):
+    """Call /evaluateStrategy and return the encrypted result hex (or None on error)."""
+    print(f"   -> [FHE Client] Evaluating strategy '{strategy['id']}' on the FHE engine...")
     try:
         payload = {
             "strategy_type": strategy["strategy_type"],
-            "encrypted_upper_bound": strategy["encrypted_upper_bound"],
-            "encrypted_lower_bound": strategy["encrypted_lower_bound"],
-            "server_key": strategy["server_key"],
+            "encrypted_upper_bound": strategy.get("encrypted_upper_bound"),
+            "encrypted_lower_bound": strategy.get("encrypted_lower_bound"),
+            "server_key": server_key,
             "current_price_cents": int(current_price * 100),
-            "encrypted_client_key": strategy["encrypted_client_key"],
         }
-        
-        response = requests.post(FHE_ENGINE_URL, json=payload, timeout=30)
+        response = requests.post(FHE_ENGINE_URL, json=payload, timeout=60)
         response.raise_for_status()
         result = response.json()
-        
-        if result.get("is_triggered", False):
-            print(f"   <- [FHE Client] Response from Rust: Condition MET.")
-            return True
-        else:
-            print(f"   <- [FHE Client] Response from Rust: Condition NOT met.")
-            return False
+        if result.get("error"):
+            print(f"   <- [FHE Client] ❌ engine error: {result['error']}")
+            return None
+        return result.get("encrypted_result")
     except Exception as e:
         print(f"   <- [FHE Client] ❌ An error occurred: {e}")
-        return False
+        return None
 
-def evaluate_leaf(encrypted_bound: str, condition: str, current_price: float,
-                  server_key: str, encrypted_client_key: str) -> bool:
-    """Call /evaluateCondition for a single LEAF node."""
+
+def get_encrypted_tree_result(condition_tree, prices_cents, server_key):
+    """Call /evaluateTree (homomorphic AND/OR/NOT) and return the encrypted result hex.
+
+    prices_cents: { price_feed_id -> int price in cents }
+    """
     try:
         payload = {
-            "encrypted_bound": encrypted_bound,
-            "condition": condition,
-            "current_price_cents": int(current_price * 100),
+            "tree": condition_tree,
             "server_key": server_key,
-            "encrypted_client_key": encrypted_client_key,
+            "prices": prices_cents,
         }
-        resp = requests.post(FHE_ENGINE_CONDITION_URL, json=payload, timeout=30)
+        resp = requests.post(FHE_ENGINE_TREE_URL, json=payload, timeout=120)
         resp.raise_for_status()
-        return resp.json().get("is_triggered", False)
+        result = resp.json()
+        if result.get("error"):
+            print(f"[FHE Client] ❌ evaluateTree error: {result['error']}")
+            return None
+        return result.get("encrypted_result")
     except Exception as e:
-        print(f"[FHE Client] ❌ evaluate_leaf error: {e}")
-        return False
+        print(f"[FHE Client] ❌ get_encrypted_tree_result error: {e}")
+        return None

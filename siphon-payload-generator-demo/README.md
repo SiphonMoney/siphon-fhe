@@ -1,4 +1,10 @@
-# Siphon Payload Generator
+# Siphon Payload Generator — DEPRECATED
+
+> **Deprecated.** Encryption now happens **in the browser** via `siphon-app/fhe-wasm`
+> (tfhe-rs compiled to WASM). The client generates its FHE keypair locally, encrypts the
+> strategy bounds, keeps the **client (secret) key in the browser**, and uploads only the
+> server key (once, via `POST /uploadServerKey`) and the ciphertext bounds. This service is no
+> longer in the data path and is not started by docker-compose. It is kept for reference only.
 
 The **Payload Generator** is a local Rust service that:
 

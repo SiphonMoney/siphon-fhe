@@ -31,3 +31,17 @@ pub fn homomorphic_or(
     sks.bitor_parallelized(a, b)
 }
 
+pub fn homomorphic_and(
+    sks: &ServerKey,
+    a: &RadixCiphertext,
+    b: &RadixCiphertext,
+) -> RadixCiphertext {
+    sks.bitand_parallelized(a, b)
+}
+
+/// Logical NOT on a 0/1-valued ciphertext: flips the low bit (1 XOR x).
+pub fn homomorphic_not(sks: &ServerKey, a: &RadixCiphertext) -> RadixCiphertext {
+    let one = sks.create_trivial_radix(1u64, NUM_BLOCKS);
+    sks.bitxor_parallelized(a, &one)
+}
+

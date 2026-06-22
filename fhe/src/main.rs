@@ -25,6 +25,7 @@ async fn main() {
     let app = Router::new()
         .route("/evaluateStrategy", post(evaluation_handler::evaluate_strategy))
         .route("/evaluateCondition", post(evaluation_handler::evaluate_condition))
+        .route("/evaluateTree", post(evaluation_handler::evaluate_tree))
         .route("/health", get(health_check))
         .layer(CorsLayer::permissive()) 
         .layer(DefaultBodyLimit::max(50000000000 * 1024 * 1024)); 
