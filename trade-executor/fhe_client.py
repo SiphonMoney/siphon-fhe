@@ -5,12 +5,24 @@ from config import FHE_ENGINE_URL, FHE_ENGINE_TREE_URL
 # (hex) that the scheduler stores on the strategy; the user's browser decrypts it locally.
 
 
+# The frontend labels simple limit orders LIMIT_BUY / LIMIT_SELL, but the FHE engine's
+# /evaluateStrategy only knows LIMIT_BUY_DIP (price <= lower) / LIMIT_SELL_RALLY (price >= upper).
+# The semantics are identical, so translate at the boundary.
+ENGINE_STRATEGY_TYPE = {
+    "LIMIT_BUY": "LIMIT_BUY_DIP",
+    "LIMIT_SELL": "LIMIT_SELL_RALLY",
+}
+
+
 def get_encrypted_result(strategy, current_price, server_key):
     """Call /evaluateStrategy and return the encrypted result hex (or None on error)."""
     print(f"   -> [FHE Client] Evaluating strategy '{strategy['id']}' on the FHE engine...")
     try:
+        strategy_type = ENGINE_STRATEGY_TYPE.get(
+            strategy["strategy_type"], strategy["strategy_type"]
+        )
         payload = {
-            "strategy_type": strategy["strategy_type"],
+            "strategy_type": strategy_type,
             "encrypted_upper_bound": strategy.get("encrypted_upper_bound"),
             "encrypted_lower_bound": strategy.get("encrypted_lower_bound"),
             "server_key": server_key,

@@ -2,7 +2,7 @@ use axum::{http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tfhe::integer::{RadixCiphertext, ServerKey};
+use tfhe::integer::{CompressedServerKey, RadixCiphertext, ServerKey};
 use crate::fhe_engine::core as fhe_core;
 
 // ── Wire format ────────────────────────────────────────────────────────────────
@@ -50,6 +50,24 @@ fn serialize_hex(ct: &RadixCiphertext) -> Result<String, String> {
         .map_err(|e| format!("bincode serialize failed for result: {}", e))
 }
 
+/// Deserialize the user's server key. The browser now sends a *compressed* server key
+/// (~20MB hex vs ~200MB expanded), so we deserialize that and decompress. Older clients
+/// (legacy payload-generator) sent an already-expanded `ServerKey`; we fall back to that
+/// format so both wire formats keep working.
+fn deserialize_server_key(hex_str: &str) -> Result<ServerKey, String> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| format!("hex decode failed for server_key: {}", e))?;
+    match bincode::deserialize::<CompressedServerKey>(&bytes) {
+        Ok(compressed) => Ok(ServerKey::from(compressed)),
+        Err(compressed_err) => bincode::deserialize::<ServerKey>(&bytes).map_err(|expanded_err| {
+            format!(
+                "server_key deserialize failed (compressed: {}; expanded: {})",
+                compressed_err, expanded_err
+            )
+        }),
+    }
+}
+
 /// Convenience: build an error tuple.
 fn bad(code: StatusCode, msg: String) -> (StatusCode, Json<EvaluationResponse>) {
     (code, Json(EvaluationResponse::err(msg)))
@@ -61,7 +79,7 @@ pub async fn evaluate_strategy(
     println!("[FHE Engine] Evaluating strategy_type='{}' current_price_cents={}",
         payload.strategy_type, payload.current_price_cents);
 
-    let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
+    let server_key: ServerKey = match deserialize_server_key(&payload.server_key) {
         Ok(k) => k,
         Err(e) => return bad(StatusCode::BAD_REQUEST, e),
     };
@@ -130,7 +148,7 @@ pub async fn evaluate_condition(
     println!("[FHE Engine] evaluateCondition condition='{}' price_cents={}",
         payload.condition, payload.current_price_cents);
 
-    let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
+    let server_key: ServerKey = match deserialize_server_key(&payload.server_key) {
         Ok(k) => k,
         Err(e) => return bad(StatusCode::BAD_REQUEST, e),
     };
@@ -217,7 +235,7 @@ pub async fn evaluate_tree(
 ) -> (StatusCode, Json<EvaluationResponse>) {
     println!("[FHE Engine] evaluateTree with {} price feeds", payload.prices.len());
 
-    let server_key: ServerKey = match deserialize_hex(&payload.server_key, "server_key") {
+    let server_key: ServerKey = match deserialize_server_key(&payload.server_key) {
         Ok(k) => k,
         Err(e) => return bad(StatusCode::BAD_REQUEST, e),
     };

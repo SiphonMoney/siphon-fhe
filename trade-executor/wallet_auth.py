@@ -5,7 +5,9 @@ from eth_account.messages import encode_defunct
 import os
 import time
 
-SIGN_MESSAGE = "Siphon note encryption v1"
+# Must match the frontend's SIGN_MESSAGE_AUTH_BASE (noteStore.ts). A mismatch makes
+# Account.recover_message recover the wrong address, 401-ing every /notes call.
+SIGN_MESSAGE = "Siphon auth v1"
 MAX_AGE_SECONDS = 300
 
 def _check_wallet_sig():

@@ -6,7 +6,9 @@ def get_live_prices(price_feed_ids):
     if not price_feed_ids: return {}
     try:
         ids_query = "&".join([f"ids[]={id}" for id in price_feed_ids])
-        url = f"{PYTH_HERMES_URL}/api/latest_price_feeds?{ids_query}"
+        # Strip any trailing slash so a configured "…pyth.network/" doesn't become "//api" (404).
+        base = PYTH_HERMES_URL.rstrip("/")
+        url = f"{base}/api/latest_price_feeds?{ids_query}"
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
