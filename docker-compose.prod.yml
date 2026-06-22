@@ -35,6 +35,17 @@ services:
       - SYPHON_VAULT_CONTRACT_ADDRESS=${SYPHON_VAULT_CONTRACT_ADDRESS}
       - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
 
+      # EVM (Sepolia) — required for the on-chain ZK withdraw + Uniswap swap path
+      - ETH_RPC_URL=${ETH_RPC_URL}
+      - EVM_EXECUTOR_KEY=${EVM_EXECUTOR_KEY}
+      - ENTRYPOINT_ADDRESS=${ENTRYPOINT_ADDRESS}
+      - UNISWAP_V3_ROUTER=${UNISWAP_V3_ROUTER}
+      - WETH_ADDRESS=${WETH_ADDRESS}
+      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY}
+      - JUPITER_API_URL=${JUPITER_API_URL:-https://quote-api.jup.ag/v6}
+      - LIFI_API_KEY=${LIFI_API_KEY:-}
+      - SKIP_ZK_VERIFY=${SKIP_ZK_VERIFY:-false}
+
     volumes:
       # Persist database
       - trade-executor-data:/app/data
@@ -93,12 +104,8 @@ services:
       retries: 3
       start_period: 30s
 
-  # 3. Rust Payload Generator — DEPRECATED. Encryption now happens in the browser
-  # (siphon-app/fhe-wasm); the client uploads only the server key + ciphertext. This service
-  # is no longer in the data path and is intentionally not deployed.
-  # payload-generator:
-  #   build: ./siphon-payload-generator-demo
-  #   ...
+  # Encryption happens in the browser (siphon-app/fhe-wasm); the client uploads only the
+  # server key + ciphertext. There is no server-side payload generator.
 
 volumes:
   trade-executor-data:

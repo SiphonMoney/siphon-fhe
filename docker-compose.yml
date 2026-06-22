@@ -67,15 +67,11 @@ services:
       - RUST_LOG=info
     restart: unless-stopped
 
-  # 3. Rust Payload Generator — DEPRECATED.
-  # Encryption now happens in the browser (siphon-app/fhe-wasm). The client generates FHE keys,
-  # encrypts bounds locally, and uploads only the server key + ciphertext. This service is no
-  # longer in the data path and is intentionally not started. See siphon-payload-generator-demo/README.md.
-  # payload-generator:
-  #   build: ./siphon-payload-generator-demo
-  #   ...
+  # Encryption happens in the browser (siphon-app/fhe-wasm): the client generates FHE keys,
+  # encrypts bounds locally, and uploads only the server key + ciphertext. There is no
+  # server-side payload generator.
 
-  # 4. Proving Relayer (ZK proof generation)
+  # 3. Proving Relayer (ZK proof generation)
   proving-relayer:
     build: ./proving-relayer
     container_name: siphon-proving-relayer

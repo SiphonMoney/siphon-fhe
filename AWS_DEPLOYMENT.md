@@ -40,7 +40,6 @@ export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output tex
 # Create ECR repositories for each service
 aws ecr create-repository --repository-name siphon-trade-executor --region $AWS_REGION
 aws ecr create-repository --repository-name siphon-fhe-engine --region $AWS_REGION
-aws ecr create-repository --repository-name siphon-payload-generator --region $AWS_REGION
 ```
 
 ## Step 2: Build and Push Images
@@ -59,10 +58,6 @@ docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/siphon-trade-execu
 # Tag and push fhe-engine
 docker tag syphon-fhe-engine:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/siphon-fhe-engine:latest
 docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/siphon-fhe-engine:latest
-
-# Tag and push payload-generator
-docker tag siphon-payload-generator:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/siphon-payload-generator:latest
-docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/siphon-payload-generator:latest
 ```
 
 ## Step 3: Launch EC2 Instance
@@ -213,13 +208,6 @@ aws elbv2 create-target-group \
     --name siphon-trade-executor-tg \
     --protocol HTTP \
     --port 5005 \
-    --vpc-id <your-vpc-id> \
-    --health-check-path /health
-
-aws elbv2 create-target-group \
-    --name siphon-payload-generator-tg \
-    --protocol HTTP \
-    --port 5009 \
     --vpc-id <your-vpc-id> \
     --health-check-path /health
 ```

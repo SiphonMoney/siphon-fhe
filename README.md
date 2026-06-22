@@ -5,7 +5,8 @@ This folder contains the **off-chain services** that power encrypted strategy cr
 - **Browser FHE (`siphon-app/fhe-wasm`, Rust→WASM + tfhe-rs)**: generates the user's FHE keypair, encrypts strategy bounds, and decrypts results — all in the browser. The client (secret) key never leaves the device.
 - **Trade Executor** (`trade-executor`, Python/Flask): stores encrypted strategies + the per-user server key, polls the oracle, asks the engine to compute the encrypted result, and runs browser-authorized on-chain execution.
 - **FHE Engine** (`fhe`, Rust/Axum + tfhe-rs): performs homomorphic comparisons and returns the **encrypted** trigger result (it can no longer decrypt — it has no client key).
-- **Payload Generator** (`siphon-payload-generator-demo`): **deprecated**, replaced by browser FHE. Kept for reference only.
+
+> The old server-side **Payload Generator** has been removed — encryption now happens entirely in the browser.
 
 ---
 
@@ -15,7 +16,6 @@ This folder contains the **off-chain services** that power encrypted strategy cr
 
 | Service | Port | Endpoint |
 |---------|------|----------|
-| Payload Generator | 5009 | `POST /generatePayload`, `GET /health` |
 | Trade Executor | 5005 | `POST /createStrategy`, `GET /health` |
 | FHE Engine | 5001 | `POST /evaluateStrategy`, `GET /health` |
 
@@ -85,15 +85,6 @@ pip install -r requirements.txt
 python init_db.py
 gunicorn --bind 0.0.0.0:5005 --workers 1 --timeout 3000 "app:app"
 ```
-
-### 3) Start Payload Generator (Rust)
-
-```bash
-cd strategies-executor/siphon-payload-generator-demo
-cargo run --release
-```
-
-Listens on: `http://localhost:5009`
 
 ---
 

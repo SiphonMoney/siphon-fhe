@@ -2,7 +2,7 @@
 
 The **Trade Executor** is the Python backend that:
 
-- receives **encrypted** strategies from the Payload Generator (`POST /createStrategy`)
+- receives **encrypted** strategies directly from the browser (`POST /createStrategy`)
 - stores strategies in **SQLite** (encrypted/compressed fields handled in the model layer)
 - runs a background **scheduler** that fetches live prices and evaluates pending strategies via the Rust **FHE Engine**
 - when a strategy triggers, performs **on-chain execution** via Solana
@@ -31,7 +31,6 @@ docker compose up --build
 This starts:
 - Trade Executor: `http://localhost:5005`
 - FHE Engine: `http://localhost:5001/evaluateStrategy`
-- Payload Generator: `http://localhost:5009/generatePayload`
 
 ---
 
@@ -65,13 +64,6 @@ EXECUTOR_PRIVATE_KEY="your_base58_private_key"
 
 ```bash
 cd strategies-executor/fhe
-cargo run --release
-```
-
-### 3) Payload Generator (Rust)
-
-```bash
-cd strategies-executor/siphon-payload-generator-demo
 cargo run --release
 ```
 
