@@ -204,6 +204,27 @@ def has_server_key(user_id):
     return jsonify({"has_key": get_server_key(user_id) is not None}), 200
 
 
+@app.route('/clientMetrics', methods=['POST'])
+@rate_limit(max_requests=60, window_seconds=60)
+def client_metrics():
+    """Receive in-browser client-side-FHE timings and log them here, so the encryption
+    performance is observable in the trade-executor terminal (it happens in the browser,
+    not on the server). Best-effort; never affects the strategy flow."""
+    d = request.json or {}
+    try:
+        print(
+            f"[ClientMetrics] strategy={d.get('strategy_id', '?')} user={str(d.get('user_id', '?'))[:10]}… | "
+            f"keygen={float(d.get('keygenMs', 0)):.0f}ms  "
+            f"serverKey(derive+upload)={float(d.get('serverKeyMs', 0)):.0f}ms  "
+            f"encrypt={float(d.get('encryptMs', 0)):.0f}ms  "
+            f"submit={float(d.get('submitMs', 0)):.0f}ms  "
+            f"total={float(d.get('totalMs', 0)):.0f}ms"
+        )
+    except Exception as e:
+        print(f"[ClientMetrics] received (unparseable): {d} ({e})")
+    return jsonify({"ok": True}), 200
+
+
 @app.route('/strategy/<strategy_id>/result', methods=['GET'])
 def get_strategy_result(strategy_id):
     """Return the latest encrypted evaluation result for a strategy. The browser decrypts it
