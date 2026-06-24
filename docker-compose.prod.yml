@@ -25,8 +25,8 @@ services:
       # Solana RPC
       - SOLANA_RPC_URL=${SOLANA_RPC_URL}
 
-      # Database
-      - DATABASE_URI=sqlite:///data/strategies.db?timeout=30
+      # Absolute path — Flask-SQLAlchemy otherwise nests relative sqlite URLs under /app/instance/
+      - DATABASE_URI=sqlite:////app/data/strategies.db?timeout=30
 
       # Auth (must match across services)
       - API_TOKEN=${API_TOKEN}
