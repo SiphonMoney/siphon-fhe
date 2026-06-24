@@ -95,11 +95,12 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
         except Exception as e:
             print(f"Warning: Could not apply SQLite migrations: {e}")
             
-        # Then set PRAGMA settings
+        # DELETE journal mode — WAL (-shm/-wal) is unreliable on Docker bind mounts.
         try:
             with db.engine.connect() as conn:
-                conn.execute(text("PRAGMA journal_mode=WAL"))
+                conn.execute(text("PRAGMA journal_mode=DELETE"))
                 conn.execute(text("PRAGMA busy_timeout=30000"))
+                conn.execute(text("PRAGMA synchronous=NORMAL"))
                 conn.commit()
         except Exception as e:
             print(f"Warning: Could not set SQLite PRAGMA: {e}")
@@ -182,8 +183,7 @@ def get_user_strategies(user_id):
                 "tx_hash": s.tx_hash,
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
-                # Browser polls this and decrypts it locally with its client key.
-                "encrypted_result": s.encrypted_result,
+                "has_encrypted_result": bool(s.encrypted_result),
                 "result_updated_at": s.result_updated_at.isoformat() if s.result_updated_at else None,
             } for s in strategies]
         }), 200
