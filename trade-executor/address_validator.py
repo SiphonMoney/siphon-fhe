@@ -1,7 +1,7 @@
 import re
 import base58
 
-EVM_CHAIN_IDS = {"1", "11155111", "42161", "10", "8453", "137"}
+EVM_CHAIN_IDS = {"1", "11155111", "42161", "10", "8453", "84532", "137"}
 EVM_PATTERN   = re.compile(r'^0x[0-9a-fA-F]{40}$')
 
 def is_valid_evm_address(addr: str) -> bool:
