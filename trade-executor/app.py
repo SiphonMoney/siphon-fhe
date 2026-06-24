@@ -11,7 +11,26 @@ from address_validator import validate_recipient
 
 
 app = Flask(__name__)
-CORS(app)
+CORS(
+    app,
+    resources={r"/*": {
+        "origins": [
+            "https://siphon-app.vercel.app",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ],
+        "allow_headers": [
+            "Content-Type",
+            "X-Wallet-Address",
+            "X-Signature",
+            "X-Timestamp",
+            "X-API-TOKEN",
+            "Authorization",
+        ],
+        "methods": ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    }},
+    supports_credentials=False,
+)
 
 # Ensure instance directory exists before setting database URI
 import os

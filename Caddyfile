@@ -1,4 +1,4 @@
-35.177.18.115.sslip.io {
+3-81-144-108.sslip.io {
     # Proving Relayer
     handle /prove* {
         reverse_proxy proving-relayer:5010
@@ -6,7 +6,6 @@
 
     # Everything else → Trade Executor (createStrategy, strategies, uploadServerKey,
     # hasServerKey, strategy/<id>/result, executeStrategy, health, notes, ...).
-    # The payload generator is deprecated — encryption now happens in the browser.
     handle {
         reverse_proxy trade-executor:5005
     }
