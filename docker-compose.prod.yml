@@ -12,6 +12,8 @@ services:
     ports:
       - "5005:5005"
     environment:
+      # Allow large FHE uploads (compressed server key ~23MB). Flask default is 16MB → 413.
+      - MAX_CONTENT_LENGTH=134217728
       # Connect to FHE Engine (service name 'fhe-engine' acts as hostname)
       - FHE_ENGINE_URL=http://fhe-engine:5001/evaluateStrategy
       - FHE_ENGINE_BRACKET_URL=http://fhe-engine:5001/evaluate_bracket_order
@@ -88,7 +90,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '4'
+          cpus: '2'  # box has 2 vCPUs; '4' exceeds the daemon limit and breaks `up -d`
           memory: 8G
         reservations:
           cpus: '2'
