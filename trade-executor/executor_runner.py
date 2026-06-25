@@ -37,8 +37,16 @@ def run_execution(strategy_dict, current_price):
     sid = strategy_dict['id']
     is_private = strategy_dict.get('is_private', False)
 
-    # ── Mark nullifier pending to block double-spend during execution ──
+    # ── Pre-flight: a spent nullifier can never be withdrawn again ──
+    # Short-circuit before building a proof / hitting eth_call, otherwise the
+    # contract reverts NullifierAlreadySpent() and the strategy re-arms forever.
     note = _find_note(strategy_dict)
+    if note and str(note.spent) == 'true':
+        print(f"[Executor] Note for strategy {sid} already spent — skipping (no retry possible)")
+        _mark_failed(sid)
+        return {"status": "FAILED", "tx_hash": None}
+
+    # ── Mark nullifier pending to block double-spend during execution ──
     if note:
         note.spent = 'pending'
         db.session.commit()
