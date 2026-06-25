@@ -95,28 +95,29 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
         except Exception as e:
             print(f"Warning: Could not apply SQLite migrations: {e}")
             
-        # WAL journal mode: lets the web worker read/write while the background
-        # scheduler thread writes, instead of DELETE mode locking the whole DB
-        # (which caused "database is locked" 500s on /notes and /createStrategy).
-        # The DB lives on a named Docker volume (ext4), not a bind mount, so the
-        # -wal/-shm sidecar files work fine here.
+        # DELETE journal mode — WAL's -wal/-shm sidecar files are unreliable on
+        # this Docker volume and cause "disk I/O error" / "database disk image is
+        # malformed" corruption under concurrent access. Do NOT switch to WAL here.
         #
-        # busy_timeout is PER-CONNECTION and NullPool opens a fresh connection on
-        # every checkout, so we set the PRAGMAs via a connect-event listener to
-        # guarantee every connection gets them — not just one at startup.
+        # The real fix for the "database is locked" 500s is a reliable PER-CONNECTION
+        # busy_timeout: NullPool opens a fresh connection on every checkout, so a
+        # one-time startup PRAGMA doesn't stick. We set it via a connect-event
+        # listener so every connection waits (up to 30s) for a lock instead of
+        # failing immediately. DELETE mode + per-connection busy_timeout handles the
+        # scheduler-thread vs web-worker contention without WAL's corruption risk.
         from sqlalchemy import event
 
         @event.listens_for(db.engine, "connect")
         def _set_sqlite_pragma(dbapi_conn, _connection_record):
             cur = dbapi_conn.cursor()
-            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA journal_mode=DELETE")
             cur.execute("PRAGMA busy_timeout=30000")
             cur.execute("PRAGMA synchronous=NORMAL")
             cur.close()
 
         try:
             with db.engine.connect() as conn:
-                conn.execute(text("PRAGMA journal_mode=WAL"))
+                conn.execute(text("PRAGMA journal_mode=DELETE"))
                 conn.execute(text("PRAGMA busy_timeout=30000"))
                 conn.execute(text("PRAGMA synchronous=NORMAL"))
                 conn.commit()
