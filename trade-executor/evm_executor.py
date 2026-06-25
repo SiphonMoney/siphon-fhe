@@ -405,6 +405,10 @@ def execute_evm_trade(strategy: dict, current_price: float) -> Optional[str]:
         print("="*60)
         return tx_hash
 
+    except FatalExecutionError:
+        # Must propagate to executor_runner so it stops retrying (e.g. NullifierAlreadySpent).
+        # Swallowing these into `return None` makes the scheduler treat a dead note as retryable.
+        raise
     except Exception as e:
         print(f"   [EVM] ❌ Error: {e}")
         import traceback
