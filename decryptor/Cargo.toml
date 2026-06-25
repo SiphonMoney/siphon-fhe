@@ -1,0 +1,24 @@
+[package]
+name = "siphon-decryptor"
+version = "0.1.0"
+edition = "2021"
+
+# Decrypt-only TEE service. Holds each user's tfhe ClientKey IN-ENCLAVE and turns the
+# fhe-engine's *encrypted* result bit into a plaintext true/false. It deliberately exposes
+# NO endpoint that returns decrypted strategy inputs — minimal TCB.
+#
+# NOTE: the `tfhe` version + feature flags MUST match ../fhe/Cargo.toml exactly, or the
+# RadixCiphertext / ClientKey produced/used by the engine+browser won't deserialize here.
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["macros"] }
+# MUST match ../fhe/Cargo.toml — same ClientKey / RadixCiphertext wire format.
+tfhe = { version = "0.5", features = ["boolean", "shortint", "integer", "seeder_unix"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1.3"
+hex = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+# Sealing the ClientKey to the enclave's attested key (x25519 + HPKE/sealedbox).
+# Pick ONE once we lock the attestation flow; placeholder dep:
+# hpke = "0.11"   # or crypto_box / age — see TODO(attestation)

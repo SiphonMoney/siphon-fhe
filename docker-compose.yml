@@ -48,6 +48,7 @@ services:
       - HELIUS_API_KEY=${HELIUS_API_KEY}
       - SOLANA_NETWORK=${SOLANA_NETWORK:-devnet}
       - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
+      - DECRYPTOR_URL=${DECRYPTOR_URL:-http://decryptor:5002}
     volumes:
       - trade-executor-data:/app/data
     depends_on:
@@ -55,6 +56,19 @@ services:
         condition: service_healthy
       fhe-engine:
         condition: service_started
+      decryptor:
+        condition: service_started
+    restart: unless-stopped
+
+  # 2b. Confidential VM decryptor (local dev)
+  decryptor:
+    build: ./decryptor
+    container_name: siphon-decryptor
+    ports:
+      - "5002:5002"
+    environment:
+      - PORT=5002
+      - SIPHON_DEV_PLAINTEXT_KEY=1
     restart: unless-stopped
 
   # 2. Rust FHE Engine (The Calculator)

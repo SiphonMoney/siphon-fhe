@@ -48,12 +48,15 @@ services:
       - JUPITER_API_URL=${JUPITER_API_URL:-https://quote-api.jup.ag/v6}
       - LIFI_API_KEY=${LIFI_API_KEY:-}
       - SKIP_ZK_VERIFY=${SKIP_ZK_VERIFY:-false}
+      - DECRYPTOR_URL=${DECRYPTOR_URL:-http://decryptor:5002}
 
     volumes:
       # Persist database
       - trade-executor-data:/app/data
     depends_on:
       fhe-engine:
+        condition: service_healthy
+      decryptor:
         condition: service_healthy
     restart: unless-stopped
     deploy:
@@ -106,6 +109,24 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # 3. Confidential VM decryptor (local dev — production runs on GCP Confidential Space)
+  decryptor:
+    build: ./decryptor
+    image: ${AWS_ACCOUNT_ID:-local}.dkr.ecr.${AWS_REGION:-local}.amazonaws.com/siphon-decryptor:${VERSION:-latest}
+    container_name: siphon-decryptor
+    ports:
+      - "5002:5002"
+    environment:
+      - PORT=5002
+      - SIPHON_DEV_PLAINTEXT_KEY=1
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:5002/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Encryption happens in the browser (siphon-app/fhe-wasm); the client uploads only the
   # server key + ciphertext. There is no server-side payload generator.

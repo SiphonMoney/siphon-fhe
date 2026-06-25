@@ -4,12 +4,9 @@ from database import db, Strategy, get_server_key
 from oracle import get_live_prices
 from fhe_client import get_encrypted_result
 from condition_evaluator import evaluate_tree_encrypted
-from config import CHECK_INTERVAL_SECONDS, PYTH_PRICE_FEED_IDS
-
-# With client-side FHE keys the scheduler can no longer decrypt the trigger bit, so it no
-# longer auto-executes. Instead it "arms" each strategy: it asks the FHE engine to compute the
-# encrypted result against the latest price and stores that ciphertext. The user's browser
-# polls the result, decrypts it locally, and authorizes execution via POST /executeStrategy.
+from config import CHECK_INTERVAL_SECONDS, PYTH_PRICE_FEED_IDS, DECRYPTOR_URL
+from decryptor_client import decrypt_trigger, decryptor_enabled
+from executor_runner import run_execution
 
 
 def _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price):
@@ -23,7 +20,8 @@ def _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price):
 
 
 def worker_loop(app):
-    print("[Scheduler] Starting worker loop (arming mode — browser decrypts & authorizes)")
+    mode = "TEE auto-execute" if decryptor_enabled() else "arming — browser decrypts & authorizes"
+    print(f"[Scheduler] Starting worker loop ({mode})")
 
     while True:
         try:
@@ -89,6 +87,25 @@ def worker_loop(app):
                                 strat.status = 'ARMED'
                             db.session.commit()
                         print(f"[Scheduler] Strategy {sid} armed | price={current_price:.2f} | fhe={fhe_ms:.0f}ms")
+
+                        # Confidential VM path: decrypt result in TEE and execute server-side.
+                        if decryptor_enabled() and enc_result:
+                            triggered, dec_err = decrypt_trigger(user_id, enc_result)
+                            if dec_err:
+                                print(f"[Scheduler] Decryptor error for {sid}: {dec_err}")
+                                continue
+                            if not triggered:
+                                continue
+                            # Re-fetch row — status may have changed while we were decrypting.
+                            strat = Strategy.query.get(sid)
+                            if not strat or strat.status in ('EXECUTED', 'FAILED'):
+                                continue
+                            print(f"[Scheduler] TEE trigger=TRUE for {sid} — executing on-chain…")
+                            try:
+                                result = run_execution(strat.to_dict(), current_price)
+                                print(f"[Scheduler] Strategy {sid} executed via TEE | {result}")
+                            except Exception as exec_err:
+                                print(f"[Scheduler] Execution failed for {sid}: {exec_err}")
 
                     except Exception as strategy_err:
                         print(f"[Scheduler] Error arming strategy {sid}: {strategy_err}")

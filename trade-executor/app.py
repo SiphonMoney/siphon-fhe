@@ -223,6 +223,36 @@ def has_server_key(user_id):
     return jsonify({"has_key": get_server_key(user_id) is not None}), 200
 
 
+@app.route('/uploadClientKey', methods=['POST'])
+@rate_limit(max_requests=20, window_seconds=60)
+def upload_client_key():
+    """Forward the user's FHE client key to the confidential-vm decryptor.
+
+    The browser never talks to the decryptor directly (private VPC). The key is forwarded
+  once and held only in the decryptor's memory; decryption of strategy inputs never happens."""
+    from decryptor_client import upload_client_key as forward_client_key, decryptor_enabled
+
+    if not decryptor_enabled():
+        return jsonify({"error": "Confidential decryptor not configured (DECRYPTOR_URL)"}), 503
+    data = request.json
+    if not data or not data.get('user_id') or not data.get('client_key'):
+        return jsonify({"error": "user_id and client_key are required"}), 400
+    result = forward_client_key(data['user_id'], data['client_key'])
+    if not result.get('ok'):
+        return jsonify({"error": result.get('error', 'upload failed')}), 502
+    return jsonify({"status": "success"}), 200
+
+
+@app.route('/hasClientKey/<user_id>', methods=['GET'])
+def has_client_key(user_id):
+    """Whether the confidential decryptor already holds this user's client key."""
+    from decryptor_client import has_client_key as decryptor_has_key, decryptor_enabled
+
+    if not decryptor_enabled():
+        return jsonify({"has_key": False, "decryptor": False}), 200
+    return jsonify({"has_key": decryptor_has_key(user_id), "decryptor": True}), 200
+
+
 @app.route('/clientMetrics', methods=['POST'])
 @rate_limit(max_requests=60, window_seconds=60)
 def client_metrics():

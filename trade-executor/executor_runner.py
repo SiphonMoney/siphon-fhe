@@ -1,10 +1,8 @@
 """Shared on-chain execution path.
 
-Previously this logic lived inline in the scheduler, which auto-executed as soon as the FHE
-result decrypted to "triggered". With client-side keys the server can no longer learn that
-bit, so execution is now authorized by the user's browser (after it decrypts the result) via
-POST /executeStrategy, which calls run_execution(). The nullifier three-state lifecycle
-('false' -> 'pending' -> 'true'/revert) is preserved exactly.
+With confidential-vm decryption (`DECRYPTOR_URL`), the scheduler decrypts the FHE result bit
+inside the TEE and calls `run_execution()` directly. Without a decryptor, the browser decrypts
+locally and authorizes via POST /executeStrategy.
 """
 import json
 import time

@@ -52,6 +52,9 @@ SKIP_ZK_VERIFY = os.getenv("SKIP_ZK_VERIFY", "false").lower() == "true"
 # --- Scheduler Configuration ---
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "10"))
 
+# --- Confidential VM decryptor (holds ClientKey; decrypts result bit only) ---
+DECRYPTOR_URL = os.getenv("DECRYPTOR_URL", "").rstrip("/")
+
 # --- Token Configuration (Solana) ---
 # Token mint addresses on Solana devnet
 SOLANA_TOKEN_MINTS = {
