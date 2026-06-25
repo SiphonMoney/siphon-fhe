@@ -125,12 +125,33 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
     tx_params["maxPriorityFeePerGas"] = priority
     tx_params["maxFeePerGas"] = max_fee
 
-    t_sign = time.monotonic()
-    signed = account.sign_transaction(tx_params)
-    t_sign = (time.monotonic() - t_sign) * 1000
-
+    # The executor wallet is an EIP-7702 delegated account (code starts 0xef0100…),
+    # which the Base sequencer caps at 1 in-flight tx. After a prior tx in the same
+    # flow (e.g. the ZK withdraw) mines, it can briefly linger in the txpool, so a
+    # back-to-back send (the swap) is rejected with
+    #   "in-flight transaction limit reached for delegated accounts" (code -32000).
+    # Retry with backoff, refreshing the pending nonce each attempt (it advances once
+    # the prior tx fully clears).
+    t_sign = 0.0
     t_send = time.monotonic()
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = None
+    for attempt in range(6):
+        try:
+            ts = time.monotonic()
+            signed = account.sign_transaction(tx_params)
+            t_sign = (time.monotonic() - ts) * 1000
+            tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+            break
+        except Exception as e:
+            if "in-flight transaction limit" in str(e) and attempt < 5:
+                wait = 2 + attempt * 2
+                print(f"   [EVM] ⏳ delegated-account in-flight limit; retry {attempt+1}/5 in {wait}s")
+                time.sleep(wait)
+                tx_params["nonce"] = w3.eth.get_transaction_count(account.address, "pending")
+                continue
+            raise
+    if tx_hash is None:
+        raise RuntimeError("Failed to broadcast tx: in-flight transaction limit not cleared after retries")
     t_send = (time.monotonic() - t_send) * 1000
     print(f"   [EVM] Tx sent: {tx_hash.hex()}")
 

@@ -1,70 +1,82 @@
-# GCP Confidential Space — siphon-decryptor
+# Phala Cloud (dstack / Intel TDX) — siphon-decryptor
 
-Runs the Rust decryptor on a SEV Confidential VM. Holds each user's `ClientKey` in VM memory;
-decrypts only the FHE engine's encrypted result bit (`triggered: true|false`).
+Runs the Rust decryptor inside a **Phala Cloud confidential VM** (dstack, Intel TDX).
+Holds each user's `ClientKey` in enclave memory; decrypts only the FHE engine's encrypted
+result bit (`triggered: true|false`). The host/operator never sees decrypted strategy inputs.
 
-## Build & push (from repo root)
+> Design + threat model: [`../docs/PHALA_TEE_DECRYPTOR.md`](../docs/PHALA_TEE_DECRYPTOR.md).
+> The service code is TEE-agnostic — only deployment changed from GCP Confidential Space to Phala.
+
+## 1. Build & push the image (from repo root)
+
+Phala pulls from any public registry — use Docker Hub or GHCR (no GCP Artifact Registry).
 
 ```bash
 cd siphon-fhe/decryptor
-docker build --platform linux/amd64 -t asia-south1-docker.pkg.dev/siphon-500509/siphon/decryptor:latest .
-docker push asia-south1-docker.pkg.dev/siphon-500509/siphon/decryptor:latest
+# Docker Hub
+docker build --platform linux/amd64 -t docker.io/<your-namespace>/siphon-decryptor:latest .
+docker push docker.io/<your-namespace>/siphon-decryptor:latest
+# (or GHCR: ghcr.io/<your-org>/siphon-decryptor:latest)
 ```
 
-## VM (existing: `siphon-decryptor`, `10.160.0.3`)
+Pin by digest for a reproducible measurement: `docker buildx imagetools inspect ...` → use the
+`@sha256:...` digest in `docker-compose.yml`.
 
-Replace the placeholder hello-world container with the real image via Confidential Space
-workload metadata, or run directly over SSH (IAP):
+## 2. Deploy to Phala Cloud
+
+Point `image:` in `docker-compose.yml` at the tag/digest you pushed, then:
 
 ```bash
-gcloud compute ssh siphon-decryptor --zone=asia-south1-c --tunnel-through-iap -- \
-  'sudo docker pull asia-south1-docker.pkg.dev/siphon-500509/siphon/decryptor:latest && \
-   sudo docker rm -f siphon-decryptor 2>/dev/null; \
-   sudo docker run -d --name siphon-decryptor --restart unless-stopped \
-     -p 5002:5002 \
-     -e SIPHON_DEV_PLAINTEXT_KEY=1 \
-     asia-south1-docker.pkg.dev/siphon-500509/siphon/decryptor:latest'
+npm install -g phala
+phala auth login <PHALA_CLOUD_API_KEY>        # from https://cloud.phala.network → API Keys
+phala cvms create --name siphon-decryptor --compose ./docker-compose.yml
+# inspect / get the public gateway URL + the measurement to pin:
+phala cvms list
+phala cvms attestation <app-id>               # TDX quote + RTMRs
 ```
 
-Health: `curl http://localhost:5002/health` (from inside the VM).
+Phala exposes each mapped port at a public TLS gateway URL, e.g.
+`https://<app-id>-5002.dstack-prod5.phala.network`. **No VPC peering needed** (unlike the old
+GCP setup) — `trade-executor` on AWS EC2 reaches it directly over HTTPS.
 
-## Wire trade-executor
-
-On the host that runs `trade-executor`, set:
+## 3. Wire trade-executor (AWS EC2)
 
 ```bash
-DECRYPTOR_URL=http://10.160.0.3:5002   # same VPC / VPN only
+DECRYPTOR_URL=https://<app-id>-5002.dstack-prod5.phala.network
 ```
 
-**AWS EC2 cannot reach `10.160.0.3` without VPC peering.** Options:
+Restart trade-executor. Scheduler logs should show `Starting worker loop (TEE auto-execute)`.
 
-1. Run trade-executor on GCP in the same VPC as the confidential VM, or
-2. Cloud VPN / VPC peering between AWS and GCP.
-
-Restart trade-executor after setting `DECRYPTOR_URL`. Scheduler logs should show
-`Starting worker loop (TEE auto-execute)`.
-
-## Frontend (Vercel)
+## 4. Frontend (Vercel)
 
 ```bash
 NEXT_PUBLIC_TEE_AUTONOMOUS=true
+# After attestation is wired (below), also pin the enclave measurement:
+# NEXT_PUBLIC_DECRYPTOR_MEASUREMENT=<RTMR/compose-hash from `phala cvms attestation`>
 ```
 
-Browser uploads client key via `POST /uploadClientKey` (proxied to decryptor). No browser
-decrypt loop when this is enabled.
+Browser uploads the client key via `POST /uploadClientKey` (proxied through trade-executor to
+the decryptor). No browser decrypt loop when this is enabled.
 
 ## API
 
 | Method | Path | Caller |
 |--------|------|--------|
 | GET | `/health` | ops |
-| GET | `/attestation` | browser (TODO: TDX quote) |
+| GET | `/attestation` | browser (TODO: return dstack TDX quote) |
 | GET | `/hasClientKey/:userId` | trade-executor proxy |
 | POST | `/clientKey` | trade-executor proxy |
 | POST | `/decrypt` | scheduler only (internal) |
 
-## Security note
+## Security note & remaining work (attestation)
 
-`SIPHON_DEV_PLAINTEXT_KEY=1` accepts hex ClientKeys over HTTP inside the private VPC.
-Before mainnet: wire TDX attestation + HPKE sealing (`/attestation`), disable plaintext mode,
-and never expose port 5002 to the public internet.
+`SIPHON_DEV_PLAINTEXT_KEY=1` accepts hex `ClientKey`s over the connection — acceptable for a
+**Base Sepolia PoC** because the key still only ever lives in TDX enclave memory and the gateway
+is TLS, but it is **not** the full guarantee. Before mainnet, wire the attestation flow (see
+`../docs/PHALA_TEE_DECRYPTOR.md` §Components and the `TODO(attestation)` markers in `src/main.rs`):
+
+1. `GET /attestation` → fetch the **TDX quote from the dstack guest agent** (socket mounted at
+   `/var/run/dstack.sock`, via the `dstack-sdk` crate) with `report_data = sha256(enclave_x25519_pubkey)`.
+2. Browser **verifies the quote + pinned measurement** (`phala cvms attestation`), then **HPKE-seals**
+   the `ClientKey` to the attested pubkey.
+3. `POST /clientKey` **unseals** with the enclave private key; then disable `SIPHON_DEV_PLAINTEXT_KEY`.

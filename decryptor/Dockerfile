@@ -1,5 +1,5 @@
-# siphon-decryptor — runs on GCP Confidential Space / Phala TDX (linux/amd64).
-# Holds ClientKeys in enclave/VM memory; decrypts only the FHE result bit.
+# siphon-decryptor — runs in a Phala Cloud confidential VM (dstack / Intel TDX, linux/amd64).
+# Holds ClientKeys in enclave memory; decrypts only the FHE result bit.
 
 FROM --platform=linux/amd64 rust:1.83-bookworm AS builder
 WORKDIR /build
@@ -12,9 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/siphon-decryptor /usr/local/bin/siphon-decryptor
 ENV PORT=5002
-# Confidential VM: keys arrive sealed to attested pubkey (TODO). Until attestation is wired,
-# the trade-executor forwards hex ClientKeys over the private VPC — never expose this publicly
-# without TLS + network isolation.
+# TDX enclave: keys should arrive sealed to the attested pubkey (TODO — see README §attestation).
+# Until that's wired, the trade-executor forwards hex ClientKeys; the key still only lives in
+# enclave memory and Phala's gateway is TLS. Disable this once /clientKey unseals.
 ENV SIPHON_DEV_PLAINTEXT_KEY=1
 EXPOSE 5002
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

@@ -1,0 +1,19 @@
+# dstack app for Phala Cloud (Intel TDX) — siphon-decryptor.
+# Deploy: phala cvms create --name siphon-decryptor --compose ./docker-compose.yml
+# Replace <your-namespace> with the registry you pushed to (pin @sha256:... for a
+# reproducible enclave measurement).
+services:
+  siphon-decryptor:
+    image: docker.io/<your-namespace>/siphon-decryptor:latest
+    restart: unless-stopped
+    ports:
+      - "5002:5002"
+    environment:
+      - PORT=5002
+      # Interim until the attestation/HPKE unseal path is wired (see README §attestation).
+      # The key still only lives inside the TDX enclave; remove once /clientKey unseals.
+      - SIPHON_DEV_PLAINTEXT_KEY=1
+    volumes:
+      # dstack guest-agent socket — lets the service fetch the TDX quote for GET /attestation
+      # (report_data = sha256(enclave x25519 pubkey)). Used once attestation is implemented.
+      - /var/run/dstack.sock:/var/run/dstack.sock
