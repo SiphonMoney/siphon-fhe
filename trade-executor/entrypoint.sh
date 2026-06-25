@@ -12,7 +12,10 @@ python init_db.py || echo "Database already initialized or init_db.py not found"
 WORKERS=${GUNICORN_WORKERS:-1}
 echo "Starting gunicorn with $WORKERS worker (SQLite mode)..."
 
-# Start gunicorn with production settings
+# Start gunicorn with production settings.
+# The scheduler is started from gunicorn.conf.py's post_fork hook (exactly once,
+# inside the single worker) — NOT at import time. Keep --preload for fast worker
+# boot; the master's preload import no longer starts a scheduler.
 exec gunicorn \
     --bind 0.0.0.0:5005 \
     --workers $WORKERS \
@@ -22,4 +25,5 @@ exec gunicorn \
     --error-logfile - \
     --capture-output \
     --preload \
+    --config gunicorn.conf.py \
     app:app

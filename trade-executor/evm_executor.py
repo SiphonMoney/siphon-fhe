@@ -288,12 +288,17 @@ def transfer_eth(w3: Web3, account, recipient: str, amount_wei: int) -> str:
     return send_tx(w3, account, tx)
 
 
-def execute_evm_trade(strategy: dict, current_price: float) -> Optional[str]:
+def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirmed=None) -> Optional[str]:
     """
     Full EVM execution flow:
       1. ZK withdraw from Siphon vault (if zkp_data present)
       2. Swap asset_in → asset_out via Uniswap v3 (if different tokens)
       3. Transfer directly if same token
+
+    on_withdraw_confirmed: optional callable(zk_tx_hash) fired the moment the ZK
+    withdraw receipt confirms on-chain (status==1), before the swap. This is the
+    point at which the nullifier is genuinely spent, so the caller marks the note
+    spent here — a later swap failure must NOT revert it.
 
     Returns tx_hash of final transaction, or None on failure.
     """
@@ -357,6 +362,17 @@ def execute_evm_trade(strategy: dict, current_price: float) -> Optional[str]:
                 )
                 t_zk_ms = (time.monotonic() - t_zk) * 1000
                 print(f"   [Benchmark] [zk_withdraw_total]   = {t_zk_ms:.0f}ms")
+                # send_tx() inside zk_withdraw_from_vault only returns after the
+                # receipt confirmed with status==1, so reaching here means the
+                # withdraw is on-chain and the nullifier is spent. Mark it NOW,
+                # before the swap, so a swap failure can't make it spendable again.
+                if zk_tx and on_withdraw_confirmed:
+                    try:
+                        on_withdraw_confirmed(zk_tx)
+                    except Exception as cb_err:
+                        # Never let bookkeeping break the on-chain flow; the
+                        # NullifierSpentSwapFailed path is the safety net.
+                        print(f"   [EVM] ⚠️ on_withdraw_confirmed callback error: {cb_err}")
             else:
                 print("   [EVM] ⚠️  zkp_data present but no pA/stateRoot — skipping ZK withdraw")
         else:

@@ -409,10 +409,14 @@ def execute_swap_and_transfer(client, executor_keypair, recipient_address, amoun
         return False
 
 
-def execute_private_withdrawal(strategy, current_price):
+def execute_private_withdrawal(strategy, current_price, on_withdraw_confirmed=None):
     """
     Execute a private withdrawal with ZK proof, then swap.
     Routes to EVM executor for ETH/EVM assets, Solana executor otherwise.
+
+    on_withdraw_confirmed: optional callable(tx_hash) invoked the instant the ZK
+    withdraw receipt confirms on-chain (status==1), so the caller can mark the
+    nullifier spent before the subsequent swap runs.
     """
     print("\n" + "="*60)
     print(f"✅ PRIVATE EXECUTION: Strategy '{strategy['id']}'")
@@ -422,7 +426,7 @@ def execute_private_withdrawal(strategy, current_price):
 
     if asset_in in evm_assets:
         from evm_executor import execute_evm_trade
-        return execute_evm_trade(strategy, current_price)
+        return execute_evm_trade(strategy, current_price, on_withdraw_confirmed=on_withdraw_confirmed)
     else:
         return execute_trade(strategy, current_price)
 

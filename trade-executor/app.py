@@ -129,10 +129,41 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
 def health():
     return jsonify({"status": "healthy", "service": "trade-executor"}), 200
 
-if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-    print("--- Starting the background scheduler thread ---")
-    scheduler_thread = threading.Thread(target=worker_loop, args=(app,), daemon=True)
-    scheduler_thread.start()
+_scheduler_started = threading.Lock()
+_scheduler_running = {"started": False}
+
+
+def start_scheduler():
+    """Start the background scheduler thread EXACTLY ONCE per process.
+
+    The scheduler must run in exactly one place. Two concurrent scheduler loops
+    will both pick up the same ARMED+triggered strategy, both call run_execution(),
+    and both attempt the same ZK withdraw with the same nullifier -> one succeeds
+    on-chain, the other reverts NullifierAlreadySpent().
+
+    Why this used to start twice:
+      1. entrypoint.sh runs `python init_db.py`, which does `from app import app`,
+         executing this module top-to-bottom and starting a scheduler thread in the
+         (short-lived) init process.
+      2. gunicorn `--preload app:app` imports this module again in the MASTER process,
+         starting another scheduler thread in the master.
+    Starting the scheduler at import time means every importer (init_db, the gunicorn
+    master, any worker) gets its own loop.
+
+    Fix: never start at import time. We start the scheduler from gunicorn's
+    `post_fork` hook (see gunicorn.conf.py) so it runs once, inside the single sync
+    worker that actually owns the shared DB session. For the dev `python app.py`
+    path we start it from the __main__ block. A per-process guard + lock makes a
+    double-call a no-op.
+    """
+    with _scheduler_started:
+        if _scheduler_running["started"]:
+            print("--- Scheduler already running in this process; skipping ---")
+            return
+        _scheduler_running["started"] = True
+        print("--- Starting the background scheduler thread ---")
+        scheduler_thread = threading.Thread(target=worker_loop, args=(app,), daemon=True)
+        scheduler_thread.start()
 
 @app.route('/createStrategy', methods=['POST'])
 @rate_limit(max_requests=50, window_seconds=60)
@@ -357,4 +388,6 @@ def execute_strategy_endpoint():
 
 
 if __name__ == '__main__':
+    # Dev path: gunicorn isn't involved, so start the scheduler here (once).
+    start_scheduler()
     app.run(port=5005, debug=False)
