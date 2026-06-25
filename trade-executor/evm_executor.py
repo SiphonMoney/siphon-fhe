@@ -96,7 +96,10 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
     tx_params.setdefault("from", account.address)
 
     t0 = time.monotonic()
-    tx_params.setdefault("nonce", w3.eth.get_transaction_count(account.address))
+    # Use the PENDING nonce so back-to-back txs in one flow (e.g. ZK withdraw →
+    # swap) queue sequentially. Using the confirmed nonce here would collide with
+    # an in-flight prior tx and the second tx gets dropped.
+    tx_params.setdefault("nonce", w3.eth.get_transaction_count(account.address, "pending"))
     tx_params.setdefault("chainId", w3.eth.chain_id)
     t_prep = (time.monotonic() - t0) * 1000
 
@@ -113,21 +116,11 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
         t_gas = (time.monotonic() - tg) * 1000
 
     base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
-    # Use high priority on Sepolia to ensure fast inclusion
+    # High priority for fast inclusion. We intentionally do NOT auto-replace the
+    # nonce here: an in-flight prior tx (pending > confirmed) is the expected
+    # state for sequential sends, not a stuck tx to RBF over.
     priority  = w3.to_wei(5, "gwei")
     max_fee   = base_fee * 3 + priority
-
-    # If there's a pending tx at this nonce, bump to replace it
-    confirmed_nonce = w3.eth.get_transaction_count(account.address)
-    pending_nonce   = w3.eth.get_transaction_count(account.address, "pending")
-    if pending_nonce > confirmed_nonce:
-        bump_priority = w3.to_wei(15, "gwei")
-        bump_max_fee  = base_fee * 4 + bump_priority
-        priority = max(priority, bump_priority)
-        max_fee  = max(max_fee, bump_max_fee)
-        tx_params["nonce"] = confirmed_nonce
-        print(f"   [EVM] Nonce {confirmed_nonce} pending — RBF bump: "
-              f"maxFee={w3.from_wei(max_fee, 'gwei'):.1f} gwei priority={w3.from_wei(priority, 'gwei'):.0f} gwei")
 
     tx_params["maxPriorityFeePerGas"] = priority
     tx_params["maxFeePerGas"] = max_fee
