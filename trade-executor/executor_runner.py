@@ -62,11 +62,14 @@ def run_execution(strategy_dict, current_price):
     except FatalExecutionError as fatal:
         print(f"[Executor] ❌ Fatal error for {sid}: {fatal}")
         _mark_failed(sid)
-        # Revert note to false — nullifier not actually spent on-chain
         if note:
-            note.spent = 'false'
+            if "NullifierAlreadySpent" in str(fatal):
+                note.spent = 'true'
+                print("[Executor] Note marked spent=true (nullifier already spent on-chain)")
+            else:
+                note.spent = 'false'
+                print("[Executor] Note reverted to spent=false (fatal error)")
             db.session.commit()
-            print("[Executor] Note reverted to spent=false (fatal error)")
         return {"status": "FAILED", "tx_hash": None}
 
     exec_ms = (time.monotonic() - t_exec) * 1000
