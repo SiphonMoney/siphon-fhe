@@ -28,11 +28,11 @@ Point `image:` in `docker-compose.yml` at the tag/digest you pushed, then:
 
 ```bash
 npm install -g phala
-phala auth login <PHALA_CLOUD_API_KEY>        # from https://cloud.phala.network → API Keys
-phala cvms create --name siphon-decryptor --compose ./docker-compose.yml
+phala login                                   # paste API key from https://cloud.phala.network → API Tokens
+phala deploy --compose ./docker-compose.yml --name siphon-decryptor --wait
 # inspect / get the public gateway URL + the measurement to pin:
 phala cvms list
-phala cvms attestation <app-id>               # TDX quote + RTMRs
+phala cvms attestation siphon-decryptor       # TDX quote + RTMRs
 ```
 
 Phala exposes each mapped port at a public TLS gateway URL, e.g.

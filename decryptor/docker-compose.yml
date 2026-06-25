@@ -4,7 +4,7 @@
 # reproducible enclave measurement).
 services:
   siphon-decryptor:
-    image: docker.io/<your-namespace>/siphon-decryptor:latest
+    image: docker.io/0xswarn/siphon-decryptor:latest
     restart: unless-stopped
     ports:
       - "5002:5002"
