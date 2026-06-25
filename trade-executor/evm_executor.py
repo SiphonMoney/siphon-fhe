@@ -5,6 +5,7 @@ Flow: ZK withdraw from vault → Uniswap v3 swap on Sepolia → funds to recipie
 import os
 import json
 import time
+from typing import Optional
 from dotenv import load_dotenv
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
@@ -294,7 +295,7 @@ def transfer_eth(w3: Web3, account, recipient: str, amount_wei: int) -> str:
     return send_tx(w3, account, tx)
 
 
-def execute_evm_trade(strategy: dict, current_price: float) -> str | None:
+def execute_evm_trade(strategy: dict, current_price: float) -> Optional[str]:
     """
     Full EVM execution flow:
       1. ZK withdraw from Siphon vault (if zkp_data present)

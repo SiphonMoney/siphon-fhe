@@ -4,6 +4,7 @@ The decryptor holds each user's tfhe ClientKey and returns only the decrypted tr
 Called from the scheduler (internal VPC); never exposes decrypted strategy inputs.
 """
 import os
+from typing import Optional, Tuple
 
 import requests
 
@@ -48,7 +49,7 @@ def has_client_key(user_id: str) -> bool:
     return False
 
 
-def decrypt_trigger(user_id: str, encrypted_result_hex: str) -> tuple[bool | None, str | None]:
+def decrypt_trigger(user_id: str, encrypted_result_hex: str) -> Tuple[Optional[bool], Optional[str]]:
     """Decrypt the FHE engine's encrypted 0/1 result. Returns (triggered, error)."""
     if not DECRYPTOR_URL:
         return None, "DECRYPTOR_URL not configured"

@@ -48,7 +48,7 @@ services:
       - JUPITER_API_URL=${JUPITER_API_URL:-https://quote-api.jup.ag/v6}
       - LIFI_API_KEY=${LIFI_API_KEY:-}
       - SKIP_ZK_VERIFY=${SKIP_ZK_VERIFY:-false}
-      - DECRYPTOR_URL=${DECRYPTOR_URL:-http://decryptor:5002}
+      - DECRYPTOR_URL=${DECRYPTOR_URL:-http://35.200.184.7:5002}
 
     volumes:
       # Persist database
