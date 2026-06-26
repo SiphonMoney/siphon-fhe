@@ -12,34 +12,35 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-LIFI_API_BASE  = "https://li.quest/v1"
-LIFI_API_KEY   = os.getenv("LIFI_API_KEY", "")
-ETH_RPC_URL    = os.getenv("ETH_RPC_URL")
+LIFI_API_BASE = "https://li.quest/v1"
+LIFI_API_KEY = os.getenv("LIFI_API_KEY", "")
 EVM_EXECUTOR_KEY = os.getenv("EVM_EXECUTOR_KEY")
+
 
 def get_lifi_quote(
     from_chain: str,
     to_chain: str,
     from_token: str,
     to_token: str,
-    from_amount: int,       # in wei / smallest unit
+    from_amount: int,
     from_address: str,
     to_address: str,
 ) -> dict:
     """Get best route quote from Li.Fi."""
     params = {
-        "fromChain":   from_chain,
-        "toChain":     to_chain,
-        "fromToken":   from_token,
-        "toToken":     to_token,
-        "fromAmount":  str(from_amount),
+        "fromChain": from_chain,
+        "toChain": to_chain,
+        "fromToken": from_token,
+        "toToken": to_token,
+        "fromAmount": str(from_amount),
         "fromAddress": from_address,
-        "toAddress":   to_address,
+        "toAddress": to_address,
     }
     headers = {"x-lifi-api-key": LIFI_API_KEY} if LIFI_API_KEY else {}
     resp = requests.get(f"{LIFI_API_BASE}/quote", params=params, headers=headers, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
 
 def execute_lifi_swap(
     from_chain: str,
@@ -48,14 +49,16 @@ def execute_lifi_swap(
     to_token: str,
     from_amount_wei: int,
     recipient: str,
+    rpc_url: str | None = None,
 ) -> str:
-    """
-    Execute a Li.Fi swap/bridge.
-    Returns tx hash.
-    """
-    w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
+    """Execute a Li.Fi swap/bridge on the source chain. Returns tx hash."""
+    if not rpc_url:
+        from evm_chain_config import get_evm_chain_config
+        rpc_url = get_evm_chain_config(from_chain).rpc_url
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
     w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-    
+
     priv_key = EVM_EXECUTOR_KEY
     if priv_key and not priv_key.startswith("0x"):
         priv_key = "0x" + priv_key
@@ -74,33 +77,32 @@ def execute_lifi_swap(
     )
     print(f"[Benchmark] lifi_quote                          = {(time.monotonic()-t0)*1000:>8.1f} ms")
 
-    # Li.Fi returns transactionRequest with to/data/value/gasLimit
     tx_req = quote.get("transactionRequest")
     if not tx_req:
         raise RuntimeError(f"Li.Fi returned no transactionRequest: {quote}")
 
-    # Approve token spend if needed (ERC20)
     approval = quote.get("estimate", {}).get("approvalAddress")
-    if approval and from_token.lower() not in ("0x0000000000000000000000000000000000000000",
-                                                 "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"):
+    if approval and from_token.lower() not in (
+        "0x0000000000000000000000000000000000000000",
+        "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    ):
         _approve_token(w3, account, from_token, approval, from_amount_wei)
 
-    # Build and send the Li.Fi transaction
     nonce = w3.eth.get_transaction_count(account.address)
     base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
     priority = w3.to_wei(2, "gwei")
 
     tx = {
-        "from":                 account.address,
-        "to":                   tx_req["to"],
-        "data":                 tx_req.get("data", "0x"),
-        "value":                int(tx_req.get("value", 0), 16) if isinstance(tx_req.get("value"), str) else int(tx_req.get("value", 0)),
-        "gas":                  int(tx_req.get("gasLimit", 500_000), 16) if isinstance(tx_req.get("gasLimit"), str) else int(tx_req.get("gasLimit", 500_000)),
-        "maxFeePerGas":         base_fee * 2 + priority,
+        "from": account.address,
+        "to": tx_req["to"],
+        "data": tx_req.get("data", "0x"),
+        "value": int(tx_req.get("value", 0), 16) if isinstance(tx_req.get("value"), str) else int(tx_req.get("value", 0)),
+        "gas": int(tx_req.get("gasLimit", 500_000), 16) if isinstance(tx_req.get("gasLimit"), str) else int(tx_req.get("gasLimit", 500_000)),
+        "maxFeePerGas": base_fee * 2 + priority,
         "maxPriorityFeePerGas": priority,
-        "nonce":                nonce,
-        "chainId":              w3.eth.chain_id,
-        "type":                 2,
+        "nonce": nonce,
+        "chainId": w3.eth.chain_id,
+        "type": 2,
     }
 
     signed = account.sign_transaction(tx)
@@ -113,6 +115,7 @@ def execute_lifi_swap(
         raise RuntimeError(f"Li.Fi tx failed: {tx_hash}")
     return tx_hash
 
+
 def _approve_token(w3, account, token_address, spender, amount):
     """Approve ERC20 spend for Li.Fi router."""
     erc20_abi = '[{"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]'
@@ -120,7 +123,8 @@ def _approve_token(w3, account, token_address, spender, amount):
     nonce = w3.eth.get_transaction_count(account.address)
     base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
     tx = token.functions.approve(spender, amount).build_transaction({
-        "from": account.address, "nonce": nonce,
+        "from": account.address,
+        "nonce": nonce,
         "maxFeePerGas": base_fee * 2 + w3.to_wei(2, "gwei"),
         "maxPriorityFeePerGas": w3.to_wei(2, "gwei"),
         "type": 2,

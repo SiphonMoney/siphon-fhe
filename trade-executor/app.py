@@ -8,6 +8,7 @@ from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
 from auth import rate_limit
 from address_validator import validate_recipient
+from evm_chain_config import SUPPORTED_EXECUTOR_CHAIN_IDS
 
 
 app = Flask(__name__)
@@ -177,11 +178,21 @@ def create_strategy():
         token_symbol = data.get('asset_in') if "LONG" in strategy_type or "SELL" in strategy_type else data.get('asset_out')
 
         # Validate recipient address matches destination chain
-        to_chain = data.get('to_chain', '11155111')
+        to_chain = data.get('to_chain', '8453')
+        from_chain = str(data.get('from_chain', '8453'))
         recipient = data.get('recipient_address', '')
         valid, err = validate_recipient(recipient, str(to_chain))
         if not valid:
             return jsonify({"error": err}), 400
+
+        try:
+            if int(from_chain) not in SUPPORTED_EXECUTOR_CHAIN_IDS:
+                return jsonify({
+                    "error": f"from_chain {from_chain} is not supported by the executor. "
+                             f"Supported: {sorted(SUPPORTED_EXECUTOR_CHAIN_IDS)}"
+                }), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": f"Invalid from_chain: {from_chain}"}), 400
 
         # Client-side FHE: bounds are encrypted in the browser; the user's server key must have
         # been uploaded once via /uploadServerKey. The client key never reaches us.
@@ -203,7 +214,7 @@ def create_strategy():
             zkp_data=json.dumps(data.get('zkp_data') or data.get('zk_proof')) if (data.get('zkp_data') or data.get('zk_proof')) else None,
             condition_tree=json.dumps(condition_tree) if condition_tree else None,
             to_chain=str(to_chain),
-            from_chain=str(data.get('from_chain', '11155111')),
+            from_chain=from_chain,
         )
         
         db.session.add(new_strategy)

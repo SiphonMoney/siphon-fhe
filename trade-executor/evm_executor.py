@@ -1,6 +1,7 @@
 """
 EVM trade executor for Siphon Protocol.
-Flow: ZK withdraw from vault → Uniswap v3 swap on Sepolia → funds to recipient
+Flow: ZK withdraw from vault → Uniswap v3 swap → funds to recipient.
+Chain-specific RPC + contracts come from evm_chain_config (per strategy from_chain).
 """
 import os
 import json
@@ -10,26 +11,19 @@ from dotenv import load_dotenv
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 
+from evm_chain_config import (
+    EvmChainConfig,
+    NATIVE_ASSET,
+    get_evm_chain_config,
+    resolve_execution_chain_id,
+)
+
 load_dotenv(override=True)
 
-# --- Config ---
-ETH_RPC_URL        = os.getenv("ETH_RPC_URL", "https://rpc.sepolia.org")
-EVM_EXECUTOR_KEY   = os.getenv("EVM_EXECUTOR_KEY")   # hex private key, no 0x prefix needed
-ENTRYPOINT_ADDRESS = os.getenv("ENTRYPOINT_ADDRESS", "0xCd42793bda2E4ca65E47428329A839194DC3eeaD")
-UNISWAP_V3_ROUTER  = os.getenv("UNISWAP_V3_ROUTER",  "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b")  # Sepolia UniversalRouter
-WETH_ADDRESS       = os.getenv("WETH_ADDRESS",        "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14")  # Sepolia WETH
-NATIVE_ASSET       = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+EVM_EXECUTOR_KEY = os.getenv("EVM_EXECUTOR_KEY")  # hex private key, no 0x prefix needed
 
 # Token decimals
 TOKEN_DECIMALS = {"ETH": 18, "USDC": 6, "USDT": 6, "WBTC": 8}
-
-# Sepolia token addresses
-SEPOLIA_TOKENS = {
-    "USDC": os.getenv("USDC_ADDRESS", "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
-    "USDT": "0xaa8e23fb1079ea71e0a56f48a2aa51851d8433d0",
-    "WBTC": "0x92f3B59a79bFf5dc60c0d59eA13a44D082B2bdFC",
-    "WETH": WETH_ADDRESS,
-}
 
 # Minimal ABIs
 ENTRYPOINT_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"verify","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"}]')
@@ -78,8 +72,8 @@ UNIVERSAL_ROUTER_ABI = json.loads('[{"inputs":[{"internalType":"bytes","name":"c
 WETH_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"deposit","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"guy","type":"address"},{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]')
 
 
-def get_web3() -> Web3:
-    w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
+def get_web3(chain: EvmChainConfig) -> Web3:
+    w3 = Web3(Web3.HTTPProvider(chain.rpc_url))
     w3.middleware_onion.inject(geth_poa_middleware, layer=0)
     return w3
 
@@ -171,6 +165,7 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
 def zk_withdraw_from_vault(
     w3: Web3,
     account,
+    chain: EvmChainConfig,
     asset_address: str,
     recipient: str,
     amount_wei: int,
@@ -180,10 +175,10 @@ def zk_withdraw_from_vault(
     Call Entrypoint.withdraw() with the ZK proof to pull funds out of the vault.
     zk_proof must contain: stateRoot, nullifierHash, newCommitment, pA, pB, pC
     """
-    print(f"   [EVM] ZK withdraw: {amount_wei} wei of {asset_address} → {recipient}")
+    print(f"   [EVM] ZK withdraw on {chain.name} ({chain.chain_id}): {amount_wei} wei of {asset_address} → {recipient}")
 
     entrypoint = w3.eth.contract(
-        address=Web3.to_checksum_address(ENTRYPOINT_ADDRESS),
+        address=Web3.to_checksum_address(chain.entrypoint),
         abi=ENTRYPOINT_ABI,
     )
 
@@ -213,9 +208,9 @@ def zk_withdraw_from_vault(
          int(zk_proof["newCommitment"]), pA, pB, pC]
     )
     t_dryrun = time.monotonic()
-    _resp = _req.post(ETH_RPC_URL, json={
+    _resp = _req.post(chain.rpc_url, json={
         "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-        "params": [{"to": ENTRYPOINT_ADDRESS, "from": account.address, "data": "0x" + _calldata.hex(), "gas": "0x4C4B40"}, "latest"]
+        "params": [{"to": chain.entrypoint, "from": account.address, "data": "0x" + _calldata.hex(), "gas": "0x4C4B40"}, "latest"]
     }, timeout=15).json()
     t_dryrun = (time.monotonic() - t_dryrun) * 1000
     if "error" in _resp:
@@ -254,6 +249,7 @@ def zk_withdraw_from_vault(
 def swap_eth_to_token(
     w3: Web3,
     account,
+    chain: EvmChainConfig,
     token_out_address: str,
     amount_wei: int,
     recipient: str,
@@ -261,10 +257,10 @@ def swap_eth_to_token(
 ) -> str:
     """ETH → token via Uniswap UniversalRouter: WRAP_ETH + V3_SWAP_EXACT_IN."""
     from eth_abi import encode as _abi_encode
-    print(f"   [EVM] Swapping {amount_wei} wei ETH → {token_out_address} via UniversalRouter")
+    print(f"   [EVM] Swapping on {chain.name} ({chain.chain_id}): {amount_wei} wei ETH → {token_out_address} via UniversalRouter")
 
     router = w3.eth.contract(
-        address=Web3.to_checksum_address(UNISWAP_V3_ROUTER),
+        address=Web3.to_checksum_address(chain.uniswap_v3_router),
         abi=UNIVERSAL_ROUTER_ABI,
     )
 
@@ -273,11 +269,11 @@ def swap_eth_to_token(
 
     wrap_input = _abi_encode(
         ["address", "uint256"],
-        [Web3.to_checksum_address(UNISWAP_V3_ROUTER), amount_wei],
+        [Web3.to_checksum_address(chain.uniswap_v3_router), amount_wei],
     )
 
     path = (
-        bytes.fromhex(Web3.to_checksum_address(WETH_ADDRESS)[2:])
+        bytes.fromhex(Web3.to_checksum_address(chain.weth)[2:])
         + fee_tier.to_bytes(3, "big")
         + bytes.fromhex(Web3.to_checksum_address(token_out_address)[2:])
     )
@@ -331,12 +327,20 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
         return None
 
     try:
-        w3 = get_web3()
+        exec_chain_id = resolve_execution_chain_id(strategy)
+        chain = get_evm_chain_config(exec_chain_id)
+        w3 = get_web3(chain)
         if not w3.is_connected():
-            print(f"   [EVM] ❌ Cannot connect to RPC: {ETH_RPC_URL}")
+            print(f"   [EVM] ❌ Cannot connect to RPC for chain {exec_chain_id}: {chain.rpc_url}")
+            return None
+
+        on_chain_id = w3.eth.chain_id
+        if on_chain_id != chain.chain_id:
+            print(f"   [EVM] ❌ RPC chain mismatch: expected {chain.chain_id}, got {on_chain_id}")
             return None
 
         account = get_executor_account(w3)
+        print(f"   [EVM] Chain: {chain.name} ({chain.chain_id}) | Entrypoint: {chain.entrypoint}")
         print(f"   [EVM] Executor: {account.address}")
 
         asset_in  = strategy.get("asset_in", "ETH").upper()
@@ -356,8 +360,8 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
             print(f"   [EVM] ❌ Invalid amount: {amount}")
             return None
 
-        to_chain   = strategy.get('to_chain', '11155111')
-        from_chain = strategy.get('from_chain', '11155111')
+        to_chain   = strategy.get('to_chain', str(exec_chain_id))
+        from_chain = strategy.get('from_chain', str(exec_chain_id))
         is_cross_chain = str(to_chain) != str(from_chain)
 
         # Step 1: ZK withdraw from vault to executor wallet
@@ -372,10 +376,11 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
                 proof = None
 
             if proof:
-                asset_address = NATIVE_ASSET if asset_in == "ETH" else SEPOLIA_TOKENS.get(asset_in, asset_in)
+                asset_address = chain.token_address(asset_in)
                 t_zk = time.monotonic()
                 zk_tx = zk_withdraw_from_vault(
                     w3, account,
+                    chain,
                     asset_address,
                     account.address,  # withdraw to executor, swap/bridge handles final delivery
                     amount_wei,
@@ -403,8 +408,11 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
         t_swap = time.monotonic()
         try:
             if is_cross_chain:
-                from_token = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" if asset_in == "ETH" else SEPOLIA_TOKENS.get(asset_in, asset_in)
-                to_token   = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" if asset_out == "ETH" else SEPOLIA_TOKENS.get(asset_out, asset_out)
+                from_token = chain.token_address(asset_in)
+                try:
+                    to_token = get_evm_chain_config(to_chain).token_address(asset_out)
+                except ValueError:
+                    to_token = NATIVE_ASSET if asset_out == "ETH" else asset_out
                 from lifi_executor import execute_lifi_swap
                 tx_hash = execute_lifi_swap(
                     from_chain=str(from_chain),
@@ -413,11 +421,12 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
                     to_token=to_token,
                     from_amount_wei=amount_wei,
                     recipient=recipient,
+                    rpc_url=chain.rpc_url,
                 )
                 print(f"   [Benchmark] [lifi_swap_total]             = {(time.monotonic()-t_swap)*1000:.0f}ms")
             elif asset_in == "ETH" and asset_out != "ETH":
-                token_out_address = SEPOLIA_TOKENS.get(asset_out, asset_out)
-                tx_hash = swap_eth_to_token(w3, account, token_out_address, amount_wei, recipient)
+                token_out_address = chain.token_address(asset_out)
+                tx_hash = swap_eth_to_token(w3, account, chain, token_out_address, amount_wei, recipient)
                 print(f"   [Benchmark] [uniswap_swap_total]          = {(time.monotonic()-t_swap)*1000:.0f}ms")
             else:
                 tx_hash = transfer_eth(w3, account, recipient, amount_wei)
@@ -436,9 +445,10 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
         return tx_hash
 
     except FatalExecutionError:
-        # Must propagate to executor_runner so it stops retrying (e.g. NullifierAlreadySpent).
-        # Swallowing these into `return None` makes the scheduler treat a dead note as retryable.
         raise
+    except ValueError as e:
+        print(f"   [EVM] ❌ Config error: {e}")
+        return None
     except Exception as e:
         print(f"   [EVM] ❌ Error: {e}")
         import traceback
