@@ -584,22 +584,41 @@ def deposit_to_vault(
         abi=ENTRYPOINT_ABI,
     )
 
+    entrypoint_addr = Web3.to_checksum_address(chain.entrypoint)
+
     # Approve the Entrypoint to pull the tokens (Entrypoint routes them straight to the vault).
+    # Set explicit gas so build_transaction does NOT run an inline estimate_gas (which would hit
+    # the same read-after-write RPC lag and could simulate against stale state).
     approve_tx = token.functions.approve(
-        Web3.to_checksum_address(chain.entrypoint),
+        entrypoint_addr,
         amount_wei,
-    ).build_transaction({"from": account.address})
+    ).build_transaction({"from": account.address, "gas": 120_000})
     send_tx(w3, account, approve_tx, label="approve_deposit")
+
+    # Wait until the executor's RPC actually reflects the new allowance before building the
+    # deposit. Without this, the deposit's gas pre-flight can simulate against allowance=0 on an
+    # un-synced replica and revert with "transfer amount exceeds allowance".
+    for attempt in range(12):
+        try:
+            allowance = token.functions.allowance(account.address, entrypoint_addr).call()
+        except Exception:
+            allowance = 0
+        if allowance >= amount_wei:
+            break
+        time.sleep(1)
+    else:
+        print(f"   [EVM] ⚠️ allowance still {allowance} < {amount_wei} after wait; attempting deposit anyway")
 
     print(
         f"   [EVM] Re-depositing {amount_wei} of {token_address} into Siphon vault "
         f"as note precommitment={precommitment}"
     )
+    # Explicit gas again: skip the inline estimate and give send_tx a gas floor.
     deposit_tx = entrypoint.functions.deposit(
         Web3.to_checksum_address(token_address),
         amount_wei,
         int(precommitment),
-    ).build_transaction({"from": account.address, "value": 0})
+    ).build_transaction({"from": account.address, "value": 0, "gas": 500_000})
     return send_tx(w3, account, deposit_tx, label="vault_deposit")
 
 
