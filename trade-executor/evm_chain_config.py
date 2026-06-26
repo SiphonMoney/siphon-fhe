@@ -59,6 +59,7 @@ _CHAIN_DEFAULTS: Dict[int, EvmChainConfig] = {
         uniswap_v3_factory="0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
         weth="0x4200000000000000000000000000000000000006",
         usdc="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        swap_fee_tier=500,  # deepest WETH/USDC pool on Base
     ),
     11155111: EvmChainConfig(
         chain_id=11155111,

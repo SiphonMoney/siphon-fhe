@@ -84,12 +84,19 @@ def decode_revert(data: bytes) -> str:
 ERC20_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]')
 
 UNIVERSAL_ROUTER_ABI = json.loads('[{"inputs":[{"internalType":"bytes","name":"commands","type":"bytes"},{"internalType":"bytes[]","name":"inputs","type":"bytes[]"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"}]')
+# Uniswap SwapRouter02: exactInputSingle with the 7-field struct (no deadline) — payable,
+# auto-wraps msg.value when tokenIn == WETH9.
+SWAP_ROUTER_02_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IV3SwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
 SIMPLE_SWAP_ROUTER_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"pool","type":"address"},{"internalType":"address","name":"weth","type":"address"},{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingleWithETH","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
 UNISWAP_V3_FACTORY_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"}],"name":"getPool","outputs":[{"internalType":"address","name":"pool","type":"address"}],"stateMutability":"view","type":"function"}]')
 WETH_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"deposit","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"guy","type":"address"},{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]')
 
 _SIMPLE_SWAP_SELECTOR = Web3.keccak(
     text="exactInputSingleWithETH(address,address,(address,address,uint24,address,uint256,uint256,uint256,uint160))"
+)[:4].hex().removeprefix("0x")
+# Uniswap SwapRouter02 exactInputSingle((address,address,uint24,address,uint256,uint256,uint160)) = 0x04e45aaf
+_SWAP_ROUTER_02_SELECTOR = Web3.keccak(
+    text="exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))"
 )[:4].hex().removeprefix("0x")
 
 
@@ -103,7 +110,29 @@ def get_executor_account(w3: Web3, chain_id: int):
     return w3.eth.account.from_key(get_evm_executor_private_key(chain_id))
 
 
-def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
+# Base L2: sub-cent priority; 5 gwei exhausts a small executor wallet on heavy txs.
+_CHAIN_PRIORITY_GWEI = {
+    8453: 0.001,
+    11155111: 2.0,
+}
+
+# Modest fallbacks when estimate_gas fails (not used when estimate succeeds).
+_GAS_FALLBACK = {
+    "zk_withdraw": 1_000_000,
+    "ur_swap": 400_000,
+    "simple_swap": 400_000,
+}
+
+
+def _fee_params(w3: Web3, chain_id: int) -> dict:
+    base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
+    priority_gwei = _CHAIN_PRIORITY_GWEI.get(chain_id, 2.0)
+    priority = w3.to_wei(priority_gwei, "gwei")
+    max_fee = max(base_fee * 2 + priority, priority * 2)
+    return {"maxPriorityFeePerGas": priority, "maxFeePerGas": max_fee}
+
+
+def send_tx(w3: Web3, account, tx_params: dict, label: str = "", gas_buffer: float = 1.3) -> str:
     """Sign and send a transaction, return tx hash."""
     tx_params.setdefault("from", account.address)
 
@@ -113,29 +142,35 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
     # an in-flight prior tx and the second tx gets dropped.
     tx_params.setdefault("nonce", w3.eth.get_transaction_count(account.address, "pending"))
     tx_params.setdefault("chainId", w3.eth.chain_id)
+    chain_id = int(tx_params["chainId"])
     t_prep = (time.monotonic() - t0) * 1000
 
-    # Gas estimation with 20% buffer (only if not pre-set)
+    # Estimate gas without a preset cap, then add a small buffer (~30%).
     t_gas = 0.0
-    if "gas" not in tx_params:
-        tg = time.monotonic()
-        try:
-            gas_est = w3.eth.estimate_gas(tx_params)
-            tx_params["gas"] = int(gas_est * 1.2)
-        except Exception as e:
-            print(f"   [EVM] Gas estimation failed: {e}, using fallback 2000000")
-            tx_params["gas"] = 2_000_000
-        t_gas = (time.monotonic() - tg) * 1000
+    tg = time.monotonic()
+    gas_floor = int(tx_params.pop("gas", 0) or 0)
+    estimate_params = dict(tx_params)
+    try:
+        est = w3.eth.estimate_gas(estimate_params)
+        gas_limit = max(gas_floor, int(est * gas_buffer))
+        print(f"   [EVM] Gas estimate: {est} → limit {gas_limit} ({label or 'tx'})")
+    except Exception as e:
+        gas_limit = gas_floor or _GAS_FALLBACK.get(label, 600_000)
+        print(f"   [EVM] Gas estimation failed: {e}, using fallback {gas_limit}")
+    tx_params["gas"] = gas_limit
+    t_gas = (time.monotonic() - tg) * 1000
 
-    base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
-    # High priority for fast inclusion. We intentionally do NOT auto-replace the
-    # nonce here: an in-flight prior tx (pending > confirmed) is the expected
-    # state for sequential sends, not a stuck tx to RBF over.
-    priority  = w3.to_wei(5, "gwei")
-    max_fee   = base_fee * 3 + priority
+    fees = _fee_params(w3, chain_id)
+    max_cost = gas_limit * fees["maxFeePerGas"]
+    balance = w3.eth.get_balance(account.address)
+    if balance < max_cost:
+        raise ValueError(
+            f"Executor wallet {account.address} needs ~{max_cost / 1e18:.6f} ETH for gas "
+            f"(have {balance / 1e18:.6f} ETH on chain {chain_id}). Top up the executor wallet."
+        )
 
-    tx_params["maxPriorityFeePerGas"] = priority
-    tx_params["maxFeePerGas"] = max_fee
+    tx_params["maxPriorityFeePerGas"] = fees["maxPriorityFeePerGas"]
+    tx_params["maxFeePerGas"] = fees["maxFeePerGas"]
 
     # The executor wallet is an EIP-7702 delegated account (code starts 0xef0100…),
     # which the Base sequencer caps at 1 in-flight tx. After a prior tx in the same
@@ -214,6 +249,12 @@ def _replay_revert_reason(w3: Web3, tx_hash, block_number: int) -> str:
 def _router_uses_simple_swap(w3: Web3, router_address: str) -> bool:
     code = w3.eth.get_code(Web3.to_checksum_address(router_address)).hex().lower()
     return _SIMPLE_SWAP_SELECTOR in code
+
+
+def _router_uses_swap_router_02(w3: Web3, router_address: str) -> bool:
+    """Uniswap SwapRouter02 exposes exactInputSingle but not the UniversalRouter execute()."""
+    code = w3.eth.get_code(Web3.to_checksum_address(router_address)).hex().lower()
+    return _SWAP_ROUTER_02_SELECTOR in code and "3593564c" not in code
 
 
 def _resolve_v3_pool(
@@ -313,10 +354,10 @@ def zk_withdraw_from_vault(
         pA,
         pB,
         pC,
-    ).build_transaction({"from": account.address, "gas": 2_000_000})
+    ).build_transaction({"from": account.address})
 
     print(f"   [Benchmark] [zk_withdraw] eth_call_dryrun={t_dryrun:.0f}ms")
-    return send_tx(w3, account, tx, label="zk_withdraw")
+    return send_tx(w3, account, tx, label="zk_withdraw", gas_buffer=1.35)
 
 
 
@@ -405,6 +446,39 @@ def _swap_eth_to_token_simple(
     return send_tx(w3, account, tx, label="simple_swap")
 
 
+def _swap_eth_to_token_swap_router_02(
+    w3: Web3,
+    account,
+    chain: EvmChainConfig,
+    token_out_address: str,
+    amount_wei: int,
+    recipient: str,
+    fee_tier: int,
+) -> str:
+    """ETH → token via Uniswap SwapRouter02.exactInputSingle (payable, auto-wraps ETH)."""
+    # Pick a fee tier that actually has a pool (preferring the requested one).
+    _, fee = _resolve_v3_pool(w3, chain, chain.weth, token_out_address, fee_tier)
+    router = w3.eth.contract(
+        address=Web3.to_checksum_address(chain.uniswap_v3_router),
+        abi=SWAP_ROUTER_02_ABI,
+    )
+    params = (
+        Web3.to_checksum_address(chain.weth),       # tokenIn (msg.value gets wrapped)
+        Web3.to_checksum_address(token_out_address),  # tokenOut
+        fee,
+        Web3.to_checksum_address(recipient),
+        amount_wei,
+        0,                                            # amountOutMinimum
+        0,                                            # sqrtPriceLimitX96
+    )
+    tx = router.functions.exactInputSingle(params).build_transaction({
+        "from": account.address,
+        "value": amount_wei,
+        "gas": 300_000,
+    })
+    return send_tx(w3, account, tx, label="ur_swap")
+
+
 def swap_eth_to_token(
     w3: Web3,
     account,
@@ -423,6 +497,15 @@ def swap_eth_to_token(
             f"{amount_wei} wei ETH → {token_out_address} via SimpleSwapRouter"
         )
         return _swap_eth_to_token_simple(
+            w3, account, chain, token_out_address, amount_wei, recipient, fee
+        )
+
+    if _router_uses_swap_router_02(w3, router_addr):
+        print(
+            f"   [EVM] Swapping on {chain.name} ({chain.chain_id}): "
+            f"{amount_wei} wei ETH → {token_out_address} via SwapRouter02"
+        )
+        return _swap_eth_to_token_swap_router_02(
             w3, account, chain, token_out_address, amount_wei, recipient, fee
         )
 
