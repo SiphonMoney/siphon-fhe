@@ -21,8 +21,10 @@ class EvmChainConfig:
     rpc_url: str
     entrypoint: str
     uniswap_v3_router: str
+    uniswap_v3_factory: str
     weth: str
     usdc: str
+    swap_fee_tier: int = 3000
 
     def token_address(self, symbol: str) -> str:
         sym = symbol.upper()
@@ -54,6 +56,7 @@ _CHAIN_DEFAULTS: Dict[int, EvmChainConfig] = {
         rpc_url="https://mainnet.base.org",
         entrypoint="0x2f7d237977A86830708D9C872f5F4D3D7A980138",
         uniswap_v3_router="0x2626664c2603336E57B271c5C0b26F421741e481",
+        uniswap_v3_factory="0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
         weth="0x4200000000000000000000000000000000000006",
         usdc="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     ),
@@ -62,7 +65,9 @@ _CHAIN_DEFAULTS: Dict[int, EvmChainConfig] = {
         name="Ethereum Sepolia",
         rpc_url="https://ethereum-sepolia-rpc.publicnode.com",
         entrypoint="0x867e9C195eB85960c390D4a7A64F4e16905D6638",
+        # SimpleSwapRouter (exactInputSingleWithETH), not Universal Router execute().
         uniswap_v3_router="0x5D49f98ea31bfa7B41473Bc034BCA56B659C11A3",
+        uniswap_v3_factory="0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
         weth="0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
         usdc="0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
     ),
@@ -89,6 +94,7 @@ def get_evm_chain_config(chain_id: str | int) -> EvmChainConfig:
             rpc_url=_env("BASE_MAINNET_RPC", _env("ETH_RPC_URL", base.rpc_url)),
             entrypoint=_env("BASE_MAINNET_ENTRYPOINT", _env("ENTRYPOINT_ADDRESS", base.entrypoint)),
             uniswap_v3_router=_env("BASE_MAINNET_UNISWAP_V3_ROUTER", _env("UNISWAP_V3_ROUTER", base.uniswap_v3_router)),
+            uniswap_v3_factory=_env("BASE_MAINNET_UNISWAP_V3_FACTORY", base.uniswap_v3_factory),
             weth=_env("BASE_MAINNET_WETH", _env("WETH_ADDRESS", base.weth)),
             usdc=_env("BASE_MAINNET_USDC", _env("USDC_ADDRESS", base.usdc)),
         )
@@ -100,6 +106,7 @@ def get_evm_chain_config(chain_id: str | int) -> EvmChainConfig:
             rpc_url=_env("ETH_SEPOLIA_RPC", base.rpc_url),
             entrypoint=_env("ETH_SEPOLIA_ENTRYPOINT", base.entrypoint),
             uniswap_v3_router=_env("ETH_SEPOLIA_UNISWAP_V3_ROUTER", base.uniswap_v3_router),
+            uniswap_v3_factory=_env("ETH_SEPOLIA_UNISWAP_V3_FACTORY", base.uniswap_v3_factory),
             weth=_env("ETH_SEPOLIA_WETH", base.weth),
             usdc=_env("ETH_SEPOLIA_USDC", base.usdc),
         )

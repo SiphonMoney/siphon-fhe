@@ -69,7 +69,13 @@ def decode_revert(data: bytes) -> str:
 ERC20_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]')
 
 UNIVERSAL_ROUTER_ABI = json.loads('[{"inputs":[{"internalType":"bytes","name":"commands","type":"bytes"},{"internalType":"bytes[]","name":"inputs","type":"bytes[]"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"}]')
+SIMPLE_SWAP_ROUTER_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"pool","type":"address"},{"internalType":"address","name":"weth","type":"address"},{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingleWithETH","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
+UNISWAP_V3_FACTORY_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"}],"name":"getPool","outputs":[{"internalType":"address","name":"pool","type":"address"}],"stateMutability":"view","type":"function"}]')
 WETH_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"deposit","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"guy","type":"address"},{"internalType":"uint256","name":"wad","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]')
+
+_SIMPLE_SWAP_SELECTOR = Web3.keccak(
+    text="exactInputSingleWithETH(address,address,(address,address,uint24,address,uint256,uint256,uint256,uint160))"
+)[:4].hex()
 
 
 def get_web3(chain: EvmChainConfig) -> Web3:
@@ -154,12 +160,70 @@ def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
     t_mine = (time.monotonic() - t_mine) * 1000
 
     if receipt.status != 1:
-        raise RuntimeError(f"Transaction reverted: {tx_hash.hex()}")
+        revert_reason = _replay_revert_reason(w3, tx_hash, receipt.blockNumber)
+        detail = f" ({revert_reason})" if revert_reason else ""
+        raise RuntimeError(f"Transaction reverted: {tx_hash.hex()}{detail}")
 
     tag = f" [{label}]" if label else ""
     print(f"   [EVM] Tx mined in block {receipt.blockNumber}: {tx_hash.hex()}")
     print(f"   [Benchmark]{tag} nonce/chain={t_prep:.0f}ms | gas_est={t_gas:.0f}ms | sign={t_sign:.0f}ms | broadcast={t_send:.0f}ms | mine={t_mine:.0f}ms | gas_used={receipt.gasUsed}")
     return tx_hash.hex()
+
+
+def _replay_revert_reason(w3: Web3, tx_hash, block_number: int) -> str:
+    """Best-effort decode of an on-chain revert."""
+    try:
+        tx = w3.eth.get_transaction(tx_hash)
+        w3.eth.call(
+            {
+                "from": tx["from"],
+                "to": tx["to"],
+                "data": tx["input"],
+                "value": tx["value"],
+                "gas": tx["gas"],
+            },
+            block_number - 1,
+        )
+        return ""
+    except Exception as exc:
+        data = getattr(exc, "data", None)
+        if isinstance(data, str) and data.startswith("0x") and len(data) > 10:
+            return decode_revert(bytes.fromhex(data[2:]))
+        if isinstance(data, dict):
+            for val in data.values():
+                if isinstance(val, str) and val.startswith("0x") and len(val) > 10:
+                    return decode_revert(bytes.fromhex(val[2:]))
+        msg = str(exc)
+        if "revert" in msg.lower() or "execution" in msg.lower():
+            return msg
+        return ""
+
+
+def _router_uses_simple_swap(w3: Web3, router_address: str) -> bool:
+    code = w3.eth.get_code(Web3.to_checksum_address(router_address)).hex().lower()
+    return _SIMPLE_SWAP_SELECTOR in code
+
+
+def _resolve_v3_pool(
+    w3: Web3,
+    chain: EvmChainConfig,
+    token_in: str,
+    token_out: str,
+    fee_tier: int,
+) -> tuple[str, int]:
+    factory = w3.eth.contract(
+        address=Web3.to_checksum_address(chain.uniswap_v3_factory),
+        abi=UNISWAP_V3_FACTORY_ABI,
+    )
+    token_a = Web3.to_checksum_address(token_in)
+    token_b = Web3.to_checksum_address(token_out)
+    for fee in dict.fromkeys([fee_tier, 3000, 500, 10000, 100]):
+        pool = factory.functions.getPool(token_a, token_b, fee).call()
+        if pool and str(pool).lower() != "0x0000000000000000000000000000000000000000":
+            return Web3.to_checksum_address(pool), fee
+    raise RuntimeError(
+        f"No Uniswap V3 pool for {token_in} → {token_out} on {chain.name} (tried common fee tiers)"
+    )
 
 
 def zk_withdraw_from_vault(
@@ -246,32 +310,28 @@ def zk_withdraw_from_vault(
 
 
 
-def swap_eth_to_token(
+def _swap_eth_to_token_universal(
     w3: Web3,
     account,
     chain: EvmChainConfig,
     token_out_address: str,
     amount_wei: int,
     recipient: str,
-    fee_tier: int = 3000,
+    fee_tier: int,
 ) -> str:
-    """ETH → token via Uniswap UniversalRouter: WRAP_ETH + V3_SWAP_EXACT_IN."""
+    """ETH → token via Uniswap Universal Router: WRAP_ETH + V3_SWAP_EXACT_IN."""
     from eth_abi import encode as _abi_encode
-    print(f"   [EVM] Swapping on {chain.name} ({chain.chain_id}): {amount_wei} wei ETH → {token_out_address} via UniversalRouter")
 
     router = w3.eth.contract(
         address=Web3.to_checksum_address(chain.uniswap_v3_router),
         abi=UNIVERSAL_ROUTER_ABI,
     )
 
-    # 0x0b = WRAP_ETH, 0x00 = V3_SWAP_EXACT_IN
     commands = bytes([0x0b, 0x00])
-
     wrap_input = _abi_encode(
         ["address", "uint256"],
         [Web3.to_checksum_address(chain.uniswap_v3_router), amount_wei],
     )
-
     path = (
         bytes.fromhex(Web3.to_checksum_address(chain.weth)[2:])
         + fee_tier.to_bytes(3, "big")
@@ -287,11 +347,80 @@ def swap_eth_to_token(
         [wrap_input, swap_input],
         int(time.time()) + 300,
     ).build_transaction({
-        "from":  account.address,
+        "from": account.address,
         "value": amount_wei,
-        "gas":   300_000,
+        "gas": 300_000,
     })
     return send_tx(w3, account, tx, label="ur_swap")
+
+
+def _swap_eth_to_token_simple(
+    w3: Web3,
+    account,
+    chain: EvmChainConfig,
+    token_out_address: str,
+    amount_wei: int,
+    recipient: str,
+    fee_tier: int,
+) -> str:
+    """ETH → token via deployed SimpleSwapRouter (Sepolia entrypoint router)."""
+    pool, fee = _resolve_v3_pool(
+        w3, chain, chain.weth, token_out_address, fee_tier
+    )
+    router = w3.eth.contract(
+        address=Web3.to_checksum_address(chain.uniswap_v3_router),
+        abi=SIMPLE_SWAP_ROUTER_ABI,
+    )
+    params = (
+        Web3.to_checksum_address(chain.weth),
+        Web3.to_checksum_address(token_out_address),
+        fee,
+        Web3.to_checksum_address(recipient),
+        int(time.time()) + 300,
+        amount_wei,
+        0,
+        0,
+    )
+    tx = router.functions.exactInputSingleWithETH(
+        pool,
+        Web3.to_checksum_address(chain.weth),
+        params,
+    ).build_transaction({
+        "from": account.address,
+        "value": amount_wei,
+        "gas": 350_000,
+    })
+    return send_tx(w3, account, tx, label="simple_swap")
+
+
+def swap_eth_to_token(
+    w3: Web3,
+    account,
+    chain: EvmChainConfig,
+    token_out_address: str,
+    amount_wei: int,
+    recipient: str,
+    fee_tier: int | None = None,
+) -> str:
+    """ETH → ERC20 using the swap router configured for this chain."""
+    fee = fee_tier if fee_tier is not None else chain.swap_fee_tier
+    router_addr = chain.uniswap_v3_router
+    if _router_uses_simple_swap(w3, router_addr):
+        print(
+            f"   [EVM] Swapping on {chain.name} ({chain.chain_id}): "
+            f"{amount_wei} wei ETH → {token_out_address} via SimpleSwapRouter"
+        )
+        return _swap_eth_to_token_simple(
+            w3, account, chain, token_out_address, amount_wei, recipient, fee
+        )
+
+    print(
+        f"   [EVM] Swapping on {chain.name} ({chain.chain_id}): "
+        f"{amount_wei} wei ETH → {token_out_address} via UniversalRouter"
+    )
+    return _swap_eth_to_token_universal(
+        w3, account, chain, token_out_address, amount_wei, recipient, fee
+    )
 
 
 def transfer_eth(w3: Web3, account, recipient: str, amount_wei: int) -> str:
