@@ -101,6 +101,12 @@ class Strategy(db.Model):
     to_chain       = db.Column(db.String(20), nullable=True)
     from_chain     = db.Column(db.String(20), nullable=True)
 
+    # Swap output routing: 'address' (default — send to recipient_address) or
+    # 'vault' (re-deposit the swap output into the asset_out vault as a private note
+    # owned by output_precommitment, so the user stays shielded and withdraws later).
+    output_mode          = db.Column(db.String(20), nullable=False, default='address')
+    output_precommitment = db.Column(db.String(80), nullable=True)
+
     # Timestamps
     created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -129,6 +135,8 @@ class Strategy(db.Model):
             'condition_tree': json.loads(self.condition_tree) if self.condition_tree else None,
             'to_chain': self.to_chain,
             'from_chain': self.from_chain,
+            'output_mode': self.output_mode,
+            'output_precommitment': self.output_precommitment,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

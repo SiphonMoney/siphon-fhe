@@ -12,14 +12,22 @@ from evm_chain_config import SUPPORTED_EXECUTOR_CHAIN_IDS
 
 
 app = Flask(__name__)
+# Allowed browser origins. Extra origins can be added without a code change via the
+# CORS_ALLOWED_ORIGINS env var (comma-separated).
+_DEFAULT_CORS_ORIGINS = [
+    "https://siphon.money",
+    "https://www.siphon.money",
+    "https://siphon-app.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_CORS_ORIGINS = _DEFAULT_CORS_ORIGINS + [
+    o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
 CORS(
     app,
     resources={r"/*": {
-        "origins": [
-            "https://siphon-app.vercel.app",
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ],
+        "origins": _CORS_ORIGINS,
         "allow_headers": [
             "Content-Type",
             "X-Wallet-Address",
@@ -215,6 +223,8 @@ def create_strategy():
             condition_tree=json.dumps(condition_tree) if condition_tree else None,
             to_chain=str(to_chain),
             from_chain=from_chain,
+            output_mode=data.get('output_mode', 'address'),
+            output_precommitment=data.get('output_precommitment'),
         )
         
         db.session.add(new_strategy)

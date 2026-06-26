@@ -41,7 +41,7 @@ def get_evm_executor_private_key(chain_id: int) -> str:
 TOKEN_DECIMALS = {"ETH": 18, "USDC": 6, "USDT": 6, "WBTC": 8}
 
 # Minimal ABIs
-ENTRYPOINT_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"verify","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"}]')
+ENTRYPOINT_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_precommitment","type":"uint256"}],"name":"deposit","outputs":[{"internalType":"uint256","name":"_commitment","type":"uint256"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"verify","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"}]')
 
 # Custom error selectors for Vault/Entrypoint
 CUSTOM_ERRORS = {
@@ -529,6 +529,56 @@ def transfer_eth(w3: Web3, account, recipient: str, amount_wei: int) -> str:
     return send_tx(w3, account, tx)
 
 
+def erc20_balance_of(w3: Web3, token_address: str, owner: str) -> int:
+    token = w3.eth.contract(
+        address=Web3.to_checksum_address(token_address),
+        abi=ERC20_ABI,
+    )
+    return int(token.functions.balanceOf(Web3.to_checksum_address(owner)).call())
+
+
+def deposit_to_vault(
+    w3: Web3,
+    account,
+    chain: EvmChainConfig,
+    token_address: str,
+    amount_wei: int,
+    precommitment: int,
+) -> str:
+    """Re-deposit ERC20 funds the executor holds into the Siphon vault as a private note.
+
+    The Entrypoint pulls `amount_wei` from the executor (msg.sender) into the asset's vault and
+    mints commitment = Poseidon(actualReceived, precommitment) on-chain. The user — who alone
+    knows the nullifier/secret behind `precommitment` — can later withdraw this note themselves.
+    """
+    token = w3.eth.contract(
+        address=Web3.to_checksum_address(token_address),
+        abi=ERC20_ABI,
+    )
+    entrypoint = w3.eth.contract(
+        address=Web3.to_checksum_address(chain.entrypoint),
+        abi=ENTRYPOINT_ABI,
+    )
+
+    # Approve the Entrypoint to pull the tokens (Entrypoint routes them straight to the vault).
+    approve_tx = token.functions.approve(
+        Web3.to_checksum_address(chain.entrypoint),
+        amount_wei,
+    ).build_transaction({"from": account.address})
+    send_tx(w3, account, approve_tx, label="approve_deposit")
+
+    print(
+        f"   [EVM] Re-depositing {amount_wei} of {token_address} into Siphon vault "
+        f"as note precommitment={precommitment}"
+    )
+    deposit_tx = entrypoint.functions.deposit(
+        Web3.to_checksum_address(token_address),
+        amount_wei,
+        int(precommitment),
+    ).build_transaction({"from": account.address, "value": 0})
+    return send_tx(w3, account, deposit_tx, label="vault_deposit")
+
+
 def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirmed=None) -> Optional[str]:
     """
     Full EVM execution flow:
@@ -574,8 +624,17 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
         amount    = float(strategy.get("amount", 0))
         recipient = strategy.get("recipient_address")
         zkp_data  = strategy.get("zkp_data")
+        output_mode = (strategy.get("output_mode") or "address").lower()
+        output_precommitment = strategy.get("output_precommitment")
 
-        if not recipient:
+        # In 'vault' mode the swap output is re-deposited into the Siphon vault as a private
+        # note (no external recipient). The user later withdraws it themselves.
+        is_vault_output = output_mode == "vault"
+
+        if is_vault_output and not output_precommitment:
+            print("   [EVM] ❌ output_mode=vault but no output_precommitment")
+            return None
+        if not is_vault_output and not recipient:
             print("   [EVM] ❌ No recipient_address")
             return None
 
@@ -652,8 +711,24 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
                 print(f"   [Benchmark] [lifi_swap_total]             = {(time.monotonic()-t_swap)*1000:.0f}ms")
             elif asset_in == "ETH" and asset_out != "ETH":
                 token_out_address = chain.token_address(asset_out)
-                tx_hash = swap_eth_to_token(w3, account, chain, token_out_address, amount_wei, recipient)
-                print(f"   [Benchmark] [uniswap_swap_total]          = {(time.monotonic()-t_swap)*1000:.0f}ms")
+                if is_vault_output:
+                    # Swap to the executor wallet, then re-deposit the actual output into the
+                    # asset_out vault as a private note (Poseidon(amountOut, precommitment)).
+                    bal_before = erc20_balance_of(w3, token_out_address, account.address)
+                    swap_tx = swap_eth_to_token(
+                        w3, account, chain, token_out_address, amount_wei, account.address
+                    )
+                    print(f"   [EVM] Swap tx (to executor): {swap_tx}")
+                    received = erc20_balance_of(w3, token_out_address, account.address) - bal_before
+                    if received <= 0:
+                        raise RuntimeError(f"Swap produced no {asset_out} (balance delta {received})")
+                    print(f"   [Benchmark] [uniswap_swap_total]          = {(time.monotonic()-t_swap)*1000:.0f}ms")
+                    tx_hash = deposit_to_vault(
+                        w3, account, chain, token_out_address, received, int(output_precommitment)
+                    )
+                else:
+                    tx_hash = swap_eth_to_token(w3, account, chain, token_out_address, amount_wei, recipient)
+                    print(f"   [Benchmark] [uniswap_swap_total]          = {(time.monotonic()-t_swap)*1000:.0f}ms")
             else:
                 tx_hash = transfer_eth(w3, account, recipient, amount_wei)
                 print(f"   [Benchmark] [direct_transfer_total]       = {(time.monotonic()-t_swap)*1000:.0f}ms")
