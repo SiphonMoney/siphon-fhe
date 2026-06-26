@@ -75,7 +75,7 @@ WETH_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"wad","type"
 
 _SIMPLE_SWAP_SELECTOR = Web3.keccak(
     text="exactInputSingleWithETH(address,address,(address,address,uint24,address,uint256,uint256,uint256,uint160))"
-)[:4].hex()
+)[:4].hex().removeprefix("0x")
 
 
 def get_web3(chain: EvmChainConfig) -> Web3:
