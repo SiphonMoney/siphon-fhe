@@ -537,6 +537,30 @@ def erc20_balance_of(w3: Web3, token_address: str, owner: str) -> int:
     return int(token.functions.balanceOf(Web3.to_checksum_address(owner)).call())
 
 
+# Transfer(address indexed from, address indexed to, uint256 value)
+_TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)")
+
+
+def token_received_in_tx(w3: Web3, tx_hash: str, token_address: str, recipient: str) -> int:
+    """Sum the token amount delivered to `recipient` in `tx_hash` by reading the swap receipt's
+    ERC20 Transfer events. Deterministic — avoids the read-after-write race where a balanceOf
+    right after the swap mines can hit an un-synced RPC replica and report a 0 delta."""
+    receipt = w3.eth.get_transaction_receipt(tx_hash)
+    token = Web3.to_checksum_address(token_address)
+    recip = Web3.to_checksum_address(recipient)
+    total = 0
+    for log in receipt["logs"]:
+        if Web3.to_checksum_address(log["address"]) != token:
+            continue
+        topics = log["topics"]
+        if len(topics) < 3 or bytes(topics[0]) != bytes(_TRANSFER_TOPIC):
+            continue
+        to_addr = Web3.to_checksum_address("0x" + bytes(topics[2])[-20:].hex())
+        if to_addr == recip:
+            total += int(bytes(log["data"]).hex() or "0", 16)
+    return total
+
+
 def deposit_to_vault(
     w3: Web3,
     account,
@@ -714,14 +738,19 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
                 if is_vault_output:
                     # Swap to the executor wallet, then re-deposit the actual output into the
                     # asset_out vault as a private note (Poseidon(amountOut, precommitment)).
-                    bal_before = erc20_balance_of(w3, token_out_address, account.address)
                     swap_tx = swap_eth_to_token(
                         w3, account, chain, token_out_address, amount_wei, account.address
                     )
                     print(f"   [EVM] Swap tx (to executor): {swap_tx}")
-                    received = erc20_balance_of(w3, token_out_address, account.address) - bal_before
+                    # Read the exact amount delivered from the swap receipt (Transfer event) — robust
+                    # against RPC read-after-write lag that a balanceOf snapshot can hit.
+                    received = token_received_in_tx(w3, swap_tx, token_out_address, account.address)
                     if received <= 0:
-                        raise RuntimeError(f"Swap produced no {asset_out} (balance delta {received})")
+                        # Fallback: the executor's full token balance (it should hold only this swap's output).
+                        received = erc20_balance_of(w3, token_out_address, account.address)
+                    if received <= 0:
+                        raise RuntimeError(f"Swap produced no {asset_out} (received {received})")
+                    print(f"   [EVM] {asset_out} received from swap: {received}")
                     print(f"   [Benchmark] [uniswap_swap_total]          = {(time.monotonic()-t_swap)*1000:.0f}ms")
                     tx_hash = deposit_to_vault(
                         w3, account, chain, token_out_address, received, int(output_precommitment)
