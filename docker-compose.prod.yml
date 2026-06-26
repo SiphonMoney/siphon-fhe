@@ -40,6 +40,8 @@ services:
       # EVM — multi-chain (strategy from_chain selects RPC + contracts)
       - ETH_RPC_URL=${ETH_RPC_URL}
       - EVM_EXECUTOR_KEY=${EVM_EXECUTOR_KEY}
+      - BASE_EXECUTOR_KEY=${BASE_EXECUTOR_KEY:-}
+      - ETH_SEPOLIA_EXECUTOR_KEY=${ETH_SEPOLIA_EXECUTOR_KEY:-}
       - ENTRYPOINT_ADDRESS=${ENTRYPOINT_ADDRESS}
       - UNISWAP_V3_ROUTER=${UNISWAP_V3_ROUTER}
       - WETH_ADDRESS=${WETH_ADDRESS}

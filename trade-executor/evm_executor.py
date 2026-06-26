@@ -20,7 +20,22 @@ from evm_chain_config import (
 
 load_dotenv(override=True)
 
-EVM_EXECUTOR_KEY = os.getenv("EVM_EXECUTOR_KEY")  # hex private key, no 0x prefix needed
+# Per-chain hot wallets (hex, with or without 0x). EVM_EXECUTOR_KEY is the legacy fallback.
+_CHAIN_EXECUTOR_ENV = {
+    8453: "BASE_EXECUTOR_KEY",
+    11155111: "ETH_SEPOLIA_EXECUTOR_KEY",
+}
+
+
+def get_evm_executor_private_key(chain_id: int) -> str:
+    """Resolve signing key for a chain (BASE_EXECUTOR_KEY on Base, etc.)."""
+    env_name = _CHAIN_EXECUTOR_ENV.get(chain_id, "EVM_EXECUTOR_KEY")
+    key = (os.getenv(env_name) or os.getenv("EVM_EXECUTOR_KEY") or "").strip()
+    if not key:
+        raise ValueError(
+            f"No executor key for chain {chain_id}: set {env_name} or EVM_EXECUTOR_KEY"
+        )
+    return key if key.startswith("0x") else "0x" + key
 
 # Token decimals
 TOKEN_DECIMALS = {"ETH": 18, "USDC": 6, "USDT": 6, "WBTC": 8}
@@ -84,11 +99,8 @@ def get_web3(chain: EvmChainConfig) -> Web3:
     return w3
 
 
-def get_executor_account(w3: Web3):
-    if not EVM_EXECUTOR_KEY:
-        raise ValueError("EVM_EXECUTOR_KEY not set")
-    key = EVM_EXECUTOR_KEY if EVM_EXECUTOR_KEY.startswith("0x") else "0x" + EVM_EXECUTOR_KEY
-    return w3.eth.account.from_key(key)
+def get_executor_account(w3: Web3, chain_id: int):
+    return w3.eth.account.from_key(get_evm_executor_private_key(chain_id))
 
 
 def send_tx(w3: Web3, account, tx_params: dict, label: str = "") -> str:
@@ -451,12 +463,14 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
     print(f"\n{'='*60}")
     print(f"[EVM Executor] Strategy {strategy.get('id')} | price={current_price:.2f}")
 
-    if not EVM_EXECUTOR_KEY:
-        print("   [EVM] ❌ EVM_EXECUTOR_KEY not configured")
+    try:
+        exec_chain_id = resolve_execution_chain_id(strategy)
+        get_evm_executor_private_key(exec_chain_id)
+    except ValueError as e:
+        print(f"   [EVM] ❌ {e}")
         return None
 
     try:
-        exec_chain_id = resolve_execution_chain_id(strategy)
         chain = get_evm_chain_config(exec_chain_id)
         w3 = get_web3(chain)
         if not w3.is_connected():
@@ -468,7 +482,7 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
             print(f"   [EVM] ❌ RPC chain mismatch: expected {chain.chain_id}, got {on_chain_id}")
             return None
 
-        account = get_executor_account(w3)
+        account = get_executor_account(w3, exec_chain_id)
         print(f"   [EVM] Chain: {chain.name} ({chain.chain_id}) | Entrypoint: {chain.entrypoint}")
         print(f"   [EVM] Executor: {account.address}")
 

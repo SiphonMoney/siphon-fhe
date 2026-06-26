@@ -5,6 +5,7 @@ Quote API: GET https://li.quest/v1/quote
 """
 import os
 import time
+from typing import Optional
 import requests
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
@@ -14,7 +15,11 @@ load_dotenv()
 
 LIFI_API_BASE = "https://li.quest/v1"
 LIFI_API_KEY = os.getenv("LIFI_API_KEY", "")
-EVM_EXECUTOR_KEY = os.getenv("EVM_EXECUTOR_KEY")
+
+
+def _account_for_chain(w3: Web3, chain_id: int):
+    from evm_executor import get_evm_executor_private_key
+    return w3.eth.account.from_key(get_evm_executor_private_key(chain_id))
 
 
 def get_lifi_quote(
@@ -49,7 +54,7 @@ def execute_lifi_swap(
     to_token: str,
     from_amount_wei: int,
     recipient: str,
-    rpc_url: str | None = None,
+    rpc_url: Optional[str] = None,
 ) -> str:
     """Execute a Li.Fi swap/bridge on the source chain. Returns tx hash."""
     if not rpc_url:
@@ -59,10 +64,7 @@ def execute_lifi_swap(
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-    priv_key = EVM_EXECUTOR_KEY
-    if priv_key and not priv_key.startswith("0x"):
-        priv_key = "0x" + priv_key
-    account = w3.eth.account.from_key(priv_key)
+    account = _account_for_chain(w3, int(from_chain))
 
     print(f"[LiFi] Quoting {from_token}→{to_token} from chain {from_chain} to {to_chain}")
     t0 = time.monotonic()
