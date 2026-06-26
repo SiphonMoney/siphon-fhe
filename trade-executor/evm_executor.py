@@ -400,7 +400,7 @@ def swap_eth_to_token(
     token_out_address: str,
     amount_wei: int,
     recipient: str,
-    fee_tier: int | None = None,
+    fee_tier: Optional[int] = None,
 ) -> str:
     """ETH → ERC20 using the swap router configured for this chain."""
     fee = fee_tier if fee_tier is not None else chain.swap_fee_tier
