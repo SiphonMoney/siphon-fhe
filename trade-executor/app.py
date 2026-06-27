@@ -6,9 +6,12 @@ import json
 from database import db, Strategy, UserFheKey, get_server_key
 from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
-from auth import rate_limit
+from auth import rate_limit, require_admin
 from address_validator import validate_recipient
 from evm_chain_config import SUPPORTED_EXECUTOR_CHAIN_IDS
+from admin_wallets import (
+    chain_is_gated, is_wallet_allowed, add_wallet, remove_wallet, list_wallets,
+)
 
 
 app = Flask(__name__)
@@ -202,6 +205,17 @@ def create_strategy():
         except (TypeError, ValueError):
             return jsonify({"error": f"Invalid from_chain: {from_chain}"}), 400
 
+        # Admin allow-list gate: on gated chains (e.g. ETH Sepolia) only allow-listed wallets
+        # may create strategies. The wallet is the strategy owner (user_id), falling back to the
+        # recipient address. Applies if either the source or destination chain is gated.
+        gate_wallet = (data.get('user_id') or recipient or '')
+        for gated_cid in {c for c in (from_chain, to_chain) if chain_is_gated(c)}:
+            if not is_wallet_allowed(gate_wallet, gated_cid):
+                return jsonify({
+                    "error": f"Wallet {gate_wallet or '(none)'} is not allow-listed for chain "
+                             f"{int(gated_cid)}. This chain is restricted to admin wallets."
+                }), 403
+
         # Client-side FHE: bounds are encrypted in the browser; the user's server key must have
         # been uploaded once via /uploadServerKey. The client key never reaches us.
         if not get_server_key(data['user_id']):
@@ -232,9 +246,59 @@ def create_strategy():
         return jsonify({"status": "success", "strategy_id": new_strategy.id}), 201
 
     except Exception as e:
-        print(f"Error creating strategy: {e}") 
+        print(f"Error creating strategy: {e}")
         db.session.rollback()
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+
+
+# ----------------------- Admin wallet allow-list (gated chains) -----------------------
+# All endpoints require the X-ADMIN-TOKEN header (ADMIN_API_TOKEN). Used to restrict gated
+# chains (e.g. ETH Sepolia) to a managed set of wallets that may create/run strategies.
+
+@app.route('/admin/wallets', methods=['GET'])
+@require_admin
+def admin_list_wallets():
+    chain_id = request.args.get('chain_id')
+    try:
+        return jsonify({"wallets": list_wallets(chain_id)}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/wallets', methods=['POST'])
+@require_admin
+def admin_add_wallet():
+    data = request.json or {}
+    address = data.get('address')
+    chain_id = data.get('chain_id', 11155111)
+    label = data.get('label')
+    if not address:
+        return jsonify({"error": "address is required"}), 400
+    try:
+        row = add_wallet(address, chain_id, label)
+        return jsonify({"status": "success", "wallet": row}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/wallets', methods=['DELETE'])
+@require_admin
+def admin_remove_wallet():
+    data = request.json or {}
+    address = data.get('address')
+    chain_id = data.get('chain_id', 11155111)
+    if not address:
+        return jsonify({"error": "address is required"}), 400
+    try:
+        removed = remove_wallet(address, chain_id)
+        return jsonify({"status": "success", "removed": removed}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/strategies/<user_id>', methods=['GET'])
 def get_user_strategies(user_id):

@@ -35,6 +35,27 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def require_admin(f):
+    """Require the admin token (X-ADMIN-TOKEN header) for allow-list management endpoints.
+
+    Admin endpoints are disabled (503) unless ADMIN_API_TOKEN is configured, so the allow-list
+    can never be managed with an empty/default secret."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        expected = os.getenv('ADMIN_API_TOKEN', '').strip()
+        if not expected:
+            return jsonify({"error": "Admin API disabled: ADMIN_API_TOKEN not set"}), 503
+
+        token = request.headers.get('X-ADMIN-TOKEN') or request.headers.get('Authorization') or ''
+        if token.startswith('Bearer '):
+            token = token[7:]
+        if token.strip() != expected:
+            return jsonify({"error": "Invalid admin token"}), 401
+
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 def rate_limit(max_requests=100, window_seconds=60):
     """Decorator for rate limiting"""
     def decorator(f):

@@ -181,6 +181,27 @@ class UserFheKey(db.Model):
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class AdminWallet(db.Model):
+    """Allow-listed wallet for gated chains (e.g. ETH Sepolia testing).
+
+    When a chain is admin-gated, only wallets present here (or in the env seed) may create /
+    execute strategies on it. Rows are added at runtime via the admin API, and/or seeded from
+    an env var at boot. Addresses are stored lowercased for case-insensitive matching."""
+    __tablename__ = 'admin_wallets'
+    address    = db.Column(db.String(42), primary_key=True)   # lowercased EVM address
+    chain_id   = db.Column(db.Integer, primary_key=True)       # which chain this allows
+    label      = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'address': self.address,
+            'chain_id': self.chain_id,
+            'label': self.label,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 def get_server_key(user_id):
     """Look up a user's stored FHE server key (hex), or None if not uploaded yet."""
     row = UserFheKey.query.get(user_id)

@@ -55,6 +55,35 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "10"))
 # --- Confidential VM decryptor (holds ClientKey; decrypts result bit only) ---
 DECRYPTOR_URL = os.getenv("DECRYPTOR_URL", "").rstrip("/")
 
+# --- Admin wallet allow-list (gated chains, e.g. ETH Sepolia testing) ---
+# Separate token for the admin endpoints that manage the allow-list.
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "").strip()
+
+def _parse_int_set(raw: str) -> set:
+    out = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.add(int(part))
+            except ValueError:
+                pass
+    return out
+
+# Chains whose strategy creation/execution is restricted to allow-listed wallets.
+# Default: ETH Sepolia (11155111). Override with ADMIN_GATED_CHAIN_IDS="11155111,1337".
+ADMIN_GATED_CHAIN_IDS = _parse_int_set(os.getenv("ADMIN_GATED_CHAIN_IDS", "11155111"))
+
+# Optional boot-time seed of allow-listed wallets per gated chain (comma-separated addresses).
+# DB rows added via the admin API are merged on top of these.
+ETH_SEPOLIA_ADMIN_WALLETS = [
+    a.strip().lower() for a in os.getenv("ETH_SEPOLIA_ADMIN_WALLETS", "").split(",") if a.strip()
+]
+# chain_id -> list[address] seed map (extend here for other gated chains).
+ADMIN_WALLET_ENV_SEED = {
+    11155111: ETH_SEPOLIA_ADMIN_WALLETS,
+}
+
 # --- Token Configuration (Solana) ---
 # Token mint addresses on Solana devnet
 SOLANA_TOKEN_MINTS = {
