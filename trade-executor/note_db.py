@@ -112,6 +112,9 @@ class NullifierRegistry(Base):
 
 def migrate_note_db():
     """Add columns introduced after initial deployment. Safe to run on every startup (IF NOT EXISTS)."""
+    if 'sqlite' in str(_engine.url):
+        # SQLite doesn't support IF NOT EXISTS on ALTER TABLE; create_all() covers all columns.
+        return
     with _engine.connect() as conn:
         conn.execute(text(
             "ALTER TABLE precommitments ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP"
