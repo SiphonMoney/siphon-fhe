@@ -45,6 +45,15 @@ PYTH_HERMES_URL = os.getenv("PYTH_HERMES_URL", "https://hermes.pyth.network")
 # --- Database ---
 DATABASE_URI = os.getenv("DATABASE_URI")
 
+# --- Note DB (Supabase) ---
+NOTE_DB_URI = os.getenv("NOTE_DB_URI", "")
+if not NOTE_DB_URI:
+    raise RuntimeError("NOTE_DB_URI is not set — Supabase note DB connection required")
+
+SERVER_HMAC_SECRET = os.getenv("SERVER_HMAC_SECRET", "")
+if not SERVER_HMAC_SECRET:
+    raise RuntimeError("SERVER_HMAC_SECRET is not set — required for nullifier registry HMAC")
+
 # --- Server Settings ---
 MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 16 * 1024 * 1024))
 SKIP_ZK_VERIFY = os.getenv("SKIP_ZK_VERIFY", "false").lower() == "true"
@@ -54,6 +63,9 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "10"))
 
 # --- Confidential VM decryptor (holds ClientKey; decrypts result bit only) ---
 DECRYPTOR_URL = os.getenv("DECRYPTOR_URL", "").rstrip("/")
+
+# --- Self-referential base URL (executor_runner calls own /nullifier-registry endpoints) ---
+TRADE_EXECUTOR_BASE_URL = os.getenv("TRADE_EXECUTOR_BASE_URL", "http://localhost:5002")
 
 # --- Token Configuration (Solana) ---
 # Token mint addresses on Solana devnet

@@ -4,6 +4,7 @@ import threading
 import os
 import json
 from database import db, Strategy, UserFheKey, get_server_key
+from note_db import init_note_db
 from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
 from auth import rate_limit
@@ -31,6 +32,7 @@ CORS(
         "allow_headers": [
             "Content-Type",
             "X-Wallet-Address",
+            "X-Tag",
             "X-Signature",
             "X-Timestamp",
             "X-API-TOKEN",
@@ -69,8 +71,14 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
 
 db.init_app(app)
 
-from notes import notes_bp
-app.register_blueprint(notes_bp)
+# ── Supabase (note DB) — standalone SQLAlchemy engine, separate from main SQLite ──
+# init_note_db() creates tables on Supabase if they don't exist. Safe every startup.
+init_note_db()
+
+from precommitments import precommitments_bp
+from commitments import commitments_bp
+app.register_blueprint(precommitments_bp)
+app.register_blueprint(commitments_bp)
 
 # Enable WAL mode for better SQLite concurrency (deferred until first request)
 if DATABASE_URI and 'sqlite' in DATABASE_URI:
