@@ -4,6 +4,7 @@ With confidential-vm decryption (`DECRYPTOR_URL`), the scheduler decrypts the FH
 inside the TEE and calls `run_execution()` directly. Without a decryptor, the browser decrypts
 locally and authorizes via POST /executeStrategy.
 """
+from __future__ import annotations  # allow `str | None` annotations on Python 3.9 (Docker base)
 import json
 import time
 import hmac as hmac_lib
