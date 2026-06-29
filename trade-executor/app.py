@@ -80,8 +80,10 @@ init_note_db()
 
 from precommitments import precommitments_bp
 from commitments import commitments_bp
+from notes import notes_bp
 app.register_blueprint(precommitments_bp)
 app.register_blueprint(commitments_bp)
+app.register_blueprint(notes_bp)
 
 # Enable WAL mode for better SQLite concurrency (deferred until first request)
 if DATABASE_URI and 'sqlite' in DATABASE_URI:
