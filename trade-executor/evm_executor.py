@@ -837,3 +837,73 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
         import traceback
         traceback.print_exc()
         return None
+
+
+# Entrypoint.swap(...) ABI — atomic on-chain Vault.swap used for TWAP/grid LEGS. Each leg spends
+# ONE slice note (single nullifier, 9-signal swap circuit) and the vault swaps from its own funds.
+ENTRYPOINT_SWAP_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"_pool","type":"address"},{"internalType":"address","name":"_srcToken","type":"address"},{"internalType":"address","name":"_dstToken","type":"address"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256","name":"_amountIn","type":"uint256"},{"internalType":"uint256","name":"_minAmountOut","type":"uint256"},{"internalType":"uint24","name":"_fee","type":"uint24"},{"internalType":"uint256","name":"_deadline","type":"uint256"},{"components":[{"internalType":"uint256","name":"stateRoot","type":"uint256"},{"internalType":"uint256","name":"nullifier","type":"uint256"},{"internalType":"uint256","name":"newCommitment","type":"uint256"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"address","name":"pool","type":"address"},{"internalType":"address","name":"dstToken","type":"address"},{"internalType":"uint256","name":"fee","type":"uint256"},{"internalType":"uint256","name":"minAmountOut","type":"uint256"},{"internalType":"uint256[2]","name":"pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"pC","type":"uint256[2]"}],"internalType":"struct IVault.ZKProof","name":"_zkProof","type":"tuple"}],"name":"swap","outputs":[],"stateMutability":"payable","type":"function"}]')
+
+
+def execute_evm_leg_swap(strategy: dict, current_price: float, on_withdraw_confirmed=None) -> Optional[str]:
+    """Execute ONE TWAP/grid leg as an atomic on-chain Vault.swap (Entrypoint.swap).
+
+    The leg's zkp_data is a 9-signal swap proof (one slice note → one swap), produced by the
+    browser's generateSwapProof. We rebuild the IVault.ZKProof struct from it and submit
+    Entrypoint.swap; the vault verifies the proof, spends the slice nullifier, inserts the change
+    note, and swaps from its own funds to the proof-bound recipient. No funds touch the executor.
+    """
+    exec_chain_id = resolve_execution_chain_id(strategy)
+    chain = get_evm_chain_config(exec_chain_id)
+    w3 = get_web3(chain)
+    if not w3.is_connected():
+        print(f"   [EVM] ❌ Cannot connect to RPC for chain {exec_chain_id}")
+        return None
+    account = get_executor_account(w3, exec_chain_id)
+
+    zkp = strategy.get("zkp_data")
+    zk = zkp if isinstance(zkp, dict) else json.loads(zkp)
+    if isinstance(zk.get("proof"), dict):
+        zk = zk["proof"]
+
+    nullifiers = zk.get("nullifierHashes") or ([zk["nullifierHash"]] if zk.get("nullifierHash") else [])
+    if not nullifiers:
+        raise FatalExecutionError("leg swap proof missing nullifierHashes")
+    nullifier = int(nullifiers[0])
+
+    asset_in = strategy.get("asset_in", "ETH").upper()
+    src_token = chain.token_address(asset_in)
+    # Native sentinel → WETH for the on-chain swap path (vault wraps internally).
+    src_for_call = chain.weth if src_token == NATIVE_ASSET else src_token
+
+    pool      = Web3.to_checksum_address(zk["pool"])
+    dst_token = Web3.to_checksum_address(zk["dstToken"])
+    recipient = Web3.to_checksum_address(zk["recipient"])
+    fee       = int(zk["fee"])
+    min_out   = int(zk["minAmountOut"])
+    amount_in = int(zk["amountIn"])
+    deadline  = int(time.time()) + 300
+
+    pA = [int(x) for x in zk["pA"]]
+    pB = [[int(x) for x in row] for row in zk["pB"]]
+    pC = [int(x) for x in zk["pC"]]
+
+    zkproof_struct = (
+        int(zk["stateRoot"]), nullifier,
+        int(zk.get("changeCommitment") or zk.get("newCommitment")),
+        recipient, pool, dst_token, fee, min_out, pA, pB, pC,
+    )
+
+    entrypoint = w3.eth.contract(address=Web3.to_checksum_address(chain.entrypoint), abi=ENTRYPOINT_SWAP_ABI)
+    print(f"   [EVM] Leg swap on {chain.name}: {amount_in} {asset_in} → {dst_token} (pool {pool}, fee {fee})")
+    tx = entrypoint.functions.swap(
+        pool, Web3.to_checksum_address(src_for_call), dst_token, recipient,
+        amount_in, min_out, fee, deadline, zkproof_struct,
+    ).build_transaction({"from": account.address, "gas": 1_500_000})
+    tx_hash = send_tx(w3, account, tx, label="leg_swap")
+    # Vault.swap is atomic — once it confirms, the slice nullifier is spent on-chain.
+    if tx_hash and on_withdraw_confirmed:
+        try:
+            on_withdraw_confirmed(tx_hash)
+        except Exception as cb_err:
+            print(f"   [EVM] ⚠️ leg on_withdraw_confirmed callback error: {cb_err}")
+    return tx_hash

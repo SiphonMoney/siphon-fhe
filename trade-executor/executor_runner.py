@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from database import db, Strategy, StrategyLeg
 from trade_executor import execute_private_withdrawal
-from evm_executor import execute_evm_trade
+from evm_executor import execute_evm_trade, execute_evm_leg_swap
 from evm_executor import FatalExecutionError, NullifierSpentSwapFailed
 
 _HMAC_SECRET    = os.environ.get('SERVER_HMAC_SECRET', '').encode()
@@ -267,19 +267,19 @@ def run_leg_execution(leg_dict, strategy_dict, current_price):
             _mark_nullifier_spent(nullifier_hash)
 
     # Synthesize a single-trade strategy dict from parent + this leg: leg supplies amount + proof;
-    # parent supplies assets, chains, recipient, and output routing.
+    # parent supplies assets and chain. The leg's zkp_data is a 9-signal SWAP proof (one slice
+    # note), so it executes as an atomic Entrypoint.swap — the vault swaps from its own funds to
+    # the proof-bound recipient. N legs ⇒ N swaps ⇒ N distinct nullifiers.
     leg_strategy = dict(strategy_dict)
     leg_strategy.update({
         'amount':   leg_dict['amount'],
         'zkp_data': leg_dict.get('zkp_data'),
-        # a vault-mode leg re-deposits its slice output under its own precommitment if provided
-        'output_precommitment': leg_dict.get('output_precommitment') or strategy_dict.get('output_precommitment'),
         'is_private': True,
     })
 
     t_exec = time.monotonic()
     try:
-        tx_hash = execute_private_withdrawal(
+        tx_hash = execute_evm_leg_swap(
             leg_strategy, current_price, on_withdraw_confirmed=_on_withdraw_confirmed
         )
     except NullifierSpentSwapFailed as swap_fatal:
