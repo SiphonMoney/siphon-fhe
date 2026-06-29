@@ -64,7 +64,6 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "10"))
 # --- Confidential VM decryptor (holds ClientKey; decrypts result bit only) ---
 DECRYPTOR_URL = os.getenv("DECRYPTOR_URL", "").rstrip("/")
 
-<<<<<<< HEAD
 # --- Admin wallet allow-list (gated chains, e.g. ETH Sepolia testing) ---
 # Separate token for the admin endpoints that manage the allow-list.
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "").strip()
@@ -93,10 +92,9 @@ ETH_SEPOLIA_ADMIN_WALLETS = [
 ADMIN_WALLET_ENV_SEED = {
     11155111: ETH_SEPOLIA_ADMIN_WALLETS,
 }
-=======
+
 # --- Self-referential base URL (executor_runner calls own /nullifier-registry endpoints) ---
 TRADE_EXECUTOR_BASE_URL = os.getenv("TRADE_EXECUTOR_BASE_URL", "http://localhost:5002")
->>>>>>> origin/zk-revamp
 
 # --- Token Configuration (Solana) ---
 # Token mint addresses on Solana devnet
