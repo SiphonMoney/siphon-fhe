@@ -411,8 +411,7 @@ def execute_swap_and_transfer(client, executor_keypair, recipient_address, amoun
 
 def execute_private_withdrawal(strategy, current_price, on_withdraw_confirmed=None):
     """
-    Execute a private withdrawal with ZK proof, then swap.
-    Routes to EVM executor for ETH/EVM assets, Solana executor otherwise.
+    Execute a private withdrawal with ZK proof, then swap. EVM-only (Base / ETH Sepolia).
 
     on_withdraw_confirmed: optional callable(tx_hash) invoked the instant the ZK
     withdraw receipt confirms on-chain (status==1), so the caller can mark the
@@ -421,14 +420,13 @@ def execute_private_withdrawal(strategy, current_price, on_withdraw_confirmed=No
     print("\n" + "="*60)
     print(f"✅ PRIVATE EXECUTION: Strategy '{strategy['id']}'")
 
-    asset_in = strategy.get("asset_in", "").upper()
-    evm_assets = {"ETH", "USDC", "USDT", "WBTC", "WETH"}
+    raw_chain = strategy.get("from_chain") or strategy.get("chain_id") or strategy.get("to_chain") or "8453"
+    asset_in  = (strategy.get("asset_in")  or "").upper()
+    asset_out = (strategy.get("asset_out") or "").upper()
+    print(f"   [Route] EVM executor (chain={raw_chain}, asset_in={asset_in or '∅'} → {asset_out or '∅'})")
 
-    if asset_in in evm_assets:
-        from evm_executor import execute_evm_trade
-        return execute_evm_trade(strategy, current_price, on_withdraw_confirmed=on_withdraw_confirmed)
-    else:
-        return execute_trade(strategy, current_price)
+    from evm_executor import execute_evm_trade
+    return execute_evm_trade(strategy, current_price, on_withdraw_confirmed=on_withdraw_confirmed)
 
 
 # For testing

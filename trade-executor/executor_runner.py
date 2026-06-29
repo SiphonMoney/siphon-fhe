@@ -6,54 +6,102 @@ locally and authorizes via POST /executeStrategy.
 """
 import json
 import time
+import hmac as hmac_lib
+import hashlib
+import os
+import requests as http
 from datetime import datetime
 
 from sqlalchemy import text
 
-from database import db, Strategy, Note
-from trade_executor import execute_trade, execute_private_withdrawal
+from database import db, Strategy
+from trade_executor import execute_private_withdrawal
+from evm_executor import execute_evm_trade
 from evm_executor import FatalExecutionError, NullifierSpentSwapFailed
 
+_HMAC_SECRET    = os.environ.get('SERVER_HMAC_SECRET', '').encode()
+_API_TOKEN      = os.environ.get('API_TOKEN', '')
+_TRADE_EXECUTOR = os.environ.get('TRADE_EXECUTOR_BASE_URL', 'http://localhost:5002')
 
-def _find_note(strategy_dict):
-    """Locate the privacy-pool Note for this strategy via its zkp nullifierHash, if any."""
+
+def _nullifier_hmac(nullifier_hash: str) -> str:
+    return hmac_lib.new(_HMAC_SECRET, nullifier_hash.encode(), hashlib.sha256).hexdigest()
+
+
+def _executor_headers():
+    return {'X-API-TOKEN': _API_TOKEN, 'Content-Type': 'application/json'}
+
+
+def _get_nullifier_hash(strategy_dict) -> str | None:
+    """Extract nullifierHash from zkp_data, or None if not a private strategy."""
     zkp = strategy_dict.get('zkp_data')
     if not zkp:
         return None
     try:
         zk = zkp if isinstance(zkp, dict) else json.loads(zkp)
-        nullifier_hash = str(zk.get('nullifierHash', ''))
-        if not nullifier_hash:
-            return None
-        return Note.query.filter_by(nullifier_hash=nullifier_hash).first()
+        nh = str(zk.get('nullifierHash', ''))
+        return nh if nh else None
     except Exception as e:
-        print(f"[Executor] ⚠️ Could not resolve note: {e}")
+        print(f"[Executor] ⚠️ Could not parse nullifierHash: {e}")
         return None
 
 
-def _claim_note(note_id):
-    """Atomically move a note 'false' -> 'pending'. Returns True iff THIS caller won the claim.
+def _claim_nullifier(nullifier_hash: str, commitment_id: str | None) -> bool:
+    """Atomically claim a nullifier in nullifier_registry. Returns True iff THIS caller won."""
+    try:
+        resp = http.post(
+            f"{_TRADE_EXECUTOR}/nullifier-registry",
+            json={'nullifier_hash': nullifier_hash, 'commitment_id': commitment_id},
+            headers=_executor_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 201:
+            print(f"[Executor] Nullifier claimed: {nullifier_hash[:16]}...")
+            return True
+        if resp.status_code == 409:
+            print(f"[Executor] Nullifier already claimed (double-spend guard): {nullifier_hash[:16]}...")
+            return False
+        print(f"[Executor] ⚠️ Unexpected claim response {resp.status_code}: {resp.text}")
+        return False
+    except Exception as e:
+        print(f"[Executor] ⚠️ Nullifier claim request failed: {e}")
+        return False
 
-    Conditional UPDATE: only one caller can flip a given note out of 'false'. Under SQLite +
-    NullPool + DELETE journal mode with busy_timeout, the UPDATE takes a write lock so two
-    concurrent claimers serialize; the loser sees rowcount==0 because the row is no longer
-    'false'. We commit immediately so the 'pending' state is visible to any other process/thread
-    before we start the (slow) on-chain withdraw.
-    """
-    result = db.session.execute(
-        text("UPDATE notes SET spent='pending' WHERE id=:id AND spent='false'"),
-        {"id": note_id},
-    )
-    db.session.commit()
-    return result.rowcount == 1
+
+def _mark_nullifier_spent(nullifier_hash: str):
+    """Mark nullifier spent after on-chain withdraw confirms. Also flips commitment.spent."""
+    try:
+        resp = http.patch(
+            f"{_TRADE_EXECUTOR}/nullifier-registry/{nullifier_hash}/spent",
+            headers=_executor_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            print(f"[Executor] Nullifier marked spent: {nullifier_hash[:16]}...")
+        else:
+            print(f"[Executor] ⚠️ mark-spent response {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[Executor] ⚠️ mark-spent request failed: {e}")
+
+
+def _release_nullifier(nullifier_hash: str):
+    """Release pending claim back to false when withdraw fails/reverts."""
+    try:
+        resp = http.patch(
+            f"{_TRADE_EXECUTOR}/nullifier-registry/{nullifier_hash}/release",
+            headers=_executor_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            print(f"[Executor] Nullifier released to false: {nullifier_hash[:16]}...")
+        else:
+            print(f"[Executor] ⚠️ release response {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[Executor] ⚠️ release request failed: {e}")
 
 
 def _claim_strategy(sid):
-    """Atomically move a strategy ARMED/PENDING -> EXECUTING. Returns True iff THIS caller won.
-
-    Guards against two schedulers both executing the same ARMED strategy even before any note
-    lookup. Loser sees rowcount==0 (already EXECUTING/EXECUTED/FAILED) and aborts.
-    """
+    """Atomically move a strategy ARMED/PENDING -> EXECUTING. Returns True iff THIS caller won."""
     result = db.session.execute(
         text("UPDATE strategy SET status='EXECUTING' WHERE id=:id AND status IN ('PENDING','ARMED')"),
         {"id": sid},
@@ -62,59 +110,37 @@ def _claim_strategy(sid):
     return result.rowcount == 1
 
 
-def _mark_note_spent(note_id):
-    """Commit note.spent='true' atomically. Idempotent; safe to call from a withdraw-confirm
-    callback. The withdraw is what spends the nullifier on-chain, so once its receipt confirms
-    the note is genuinely spent and must NEVER revert to spendable."""
-    db.session.execute(
-        text("UPDATE notes SET spent='true' WHERE id=:id"),
-        {"id": note_id},
-    )
-    db.session.commit()
-    print(f"[Executor] Note {note_id} marked spent=true (ZK withdraw confirmed on-chain)")
-
-
 def run_execution(strategy_dict, current_price):
     """Execute a (browser-authorized) strategy. Returns a result dict; updates DB + nullifier.
 
     Returns: { "status": "EXECUTED"|"FAILED", "tx_hash": str|None }
     """
-    sid = strategy_dict['id']
+    sid        = strategy_dict['id']
     is_private = strategy_dict.get('is_private', False)
 
+    # commitment_id is included by the browser in the strategy payload so the executor
+    # can mark the right commitments row spent after confirmation.
+    commitment_id   = strategy_dict.get('commitment_id')
+    nullifier_hash  = _get_nullifier_hash(strategy_dict) if is_private else None
+
     # ── Strategy-level atomic guard ──
-    # Flip ARMED/PENDING -> EXECUTING before doing anything. If we don't win, another
-    # caller is already executing this strategy; abort immediately.
     if not _claim_strategy(sid):
         cur = Strategy.query.get(sid)
         cur_status = cur.status if cur else '<gone>'
         print(f"[Executor] Strategy {sid} not claimable (status={cur_status}) — another executor owns it; aborting")
         return {"status": "FAILED", "tx_hash": None}
 
-    # ── Pre-flight: a spent nullifier can never be withdrawn again ──
-    note = _find_note(strategy_dict)
-    if note and str(note.spent) == 'true':
-        print(f"[Executor] Note for strategy {sid} already spent — skipping (no retry possible)")
-        _mark_failed(sid)
-        return {"status": "FAILED", "tx_hash": None}
-
-    # ── Atomic nullifier claim: only ONE caller may move the note 'false' -> 'pending' ──
-    note_id = note.id if note else None
-    if note:
-        if not _claim_note(note_id):
-            # Lost the claim: note is 'pending' or 'true'. Another execution owns this
-            # nullifier — do NOT touch the on-chain withdraw.
-            fresh = Note.query.get(note_id)
-            print(f"[Executor] Note for strategy {sid} not claimable (spent={fresh.spent if fresh else '?'}) — aborting to avoid double-spend")
+    # ── Atomic nullifier claim via nullifier_registry ──
+    if nullifier_hash:
+        if not _claim_nullifier(nullifier_hash, commitment_id):
+            print(f"[Executor] Strategy {sid} — nullifier already claimed, aborting double-spend")
             _mark_failed(sid)
             return {"status": "FAILED", "tx_hash": None}
-        print(f"[Executor] Note for strategy {sid} claimed (spent=pending)")
 
-    # Callback fired the instant the ZK withdraw receipt confirms on-chain. From this
-    # point the nullifier is genuinely spent; a later swap failure must NOT revert it.
+    # Callback fired the instant the ZK withdraw receipt confirms on-chain.
     def _on_withdraw_confirmed(_tx_hash):
-        if note_id:
-            _mark_note_spent(note_id)
+        if nullifier_hash:
+            _mark_nullifier_spent(nullifier_hash)
 
     t_exec = time.monotonic()
     try:
@@ -123,32 +149,28 @@ def run_execution(strategy_dict, current_price):
                 strategy_dict, current_price, on_withdraw_confirmed=_on_withdraw_confirmed
             )
         else:
-            tx_hash = execute_trade(strategy_dict, current_price)
+            # EVM-only: non-private strategies execute directly from the executor wallet on the
+            # strategy's EVM chain (no Solana path).
+            tx_hash = execute_evm_trade(strategy_dict, current_price)
+
     except NullifierSpentSwapFailed as swap_fatal:
         print(f"[Executor] ⚠️  ZK withdraw confirmed but swap failed for {sid}: {swap_fatal}")
         _mark_failed(sid)
-        # Nullifier IS spent on-chain — ensure it's marked true (idempotent with the
-        # confirm-time callback above) so it's never reused.
-        if note_id:
-            _mark_note_spent(note_id)
+        # Nullifier IS spent on-chain — mark it; do NOT release.
+        if nullifier_hash:
+            _mark_nullifier_spent(nullifier_hash)
         return {"status": "FAILED", "tx_hash": None}
+
     except FatalExecutionError as fatal:
         print(f"[Executor] ❌ Fatal error for {sid}: {fatal}")
         _mark_failed(sid)
-        if note_id:
+        if nullifier_hash:
             if "NullifierAlreadySpent" in str(fatal):
-                # Spent on-chain (by someone) — mark true, never reuse.
-                _mark_note_spent(note_id)
+                # Spent on-chain by someone — mark true, never reuse.
+                _mark_nullifier_spent(nullifier_hash)
             else:
-                # Withdraw never confirmed (e.g. InvalidZKProof on dry-run) — release
-                # the claim so the note is spendable again. The confirm callback did
-                # NOT fire, so the nullifier is NOT spent on-chain.
-                db.session.execute(
-                    text("UPDATE notes SET spent='false' WHERE id=:id AND spent='pending'"),
-                    {"id": note_id},
-                )
-                db.session.commit()
-                print("[Executor] Note reverted to spent=false (fatal error, withdraw not confirmed)")
+                # Withdraw never confirmed — release claim so note is spendable again.
+                _release_nullifier(nullifier_hash)
         return {"status": "FAILED", "tx_hash": None}
 
     exec_ms = (time.monotonic() - t_exec) * 1000
@@ -157,27 +179,19 @@ def run_execution(strategy_dict, current_price):
     if tx_hash:
         strat = Strategy.query.get(sid)
         if strat:
-            strat.status = 'EXECUTED'
-            strat.tx_hash = tx_hash
+            strat.status     = 'EXECUTED'
+            strat.tx_hash    = tx_hash
             strat.executed_at = datetime.utcnow()
             db.session.commit()
             print(f"[Executor] Strategy {sid} EXECUTED: {tx_hash}")
-        # Note was already marked 'true' by the confirm callback; ensure it for the
-        # non-ZK path (no callback fires) and as a belt-and-suspenders idempotent write.
-        if note_id:
-            _mark_note_spent(note_id)
+        # Belt-and-suspenders: ensure spent for non-ZK path (confirm callback didn't fire).
+        if nullifier_hash:
+            _mark_nullifier_spent(nullifier_hash)
         return {"status": "EXECUTED", "tx_hash": tx_hash}
 
-    # No tx hash and no withdraw confirmed — release the claim only if the withdraw
-    # never spent the nullifier (still 'pending'). If the callback already set 'true',
-    # this conditional UPDATE is a no-op and the note stays spent.
-    if note_id:
-        db.session.execute(
-            text("UPDATE notes SET spent='false' WHERE id=:id AND spent='pending'"),
-            {"id": note_id},
-        )
-        db.session.commit()
-        print("[Executor] Note released to spent=false if not yet withdrawn (tx failed, retryable)")
+    # No tx hash and withdraw never confirmed — release nullifier so user can retry.
+    if nullifier_hash:
+        _release_nullifier(nullifier_hash)
     return {"status": "FAILED", "tx_hash": None}
 
 
