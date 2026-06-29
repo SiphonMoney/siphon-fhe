@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy import text
 
-from database import db, Strategy
+from database import db, Strategy, StrategyLeg
 from trade_executor import execute_private_withdrawal
 from evm_executor import execute_evm_trade
 from evm_executor import FatalExecutionError, NullifierSpentSwapFailed
@@ -208,3 +208,106 @@ def _mark_failed(sid):
     if strat:
         strat.status = 'FAILED'
         db.session.commit()
+
+
+# ---------------------------------------------------------------------------------------------
+#  Per-leg execution (TWAP slice / grid rung)
+# ---------------------------------------------------------------------------------------------
+
+def _claim_leg(leg_id):
+    """Atomically move a leg ARMED/PENDING -> EXECUTING. Returns True iff THIS caller won."""
+    result = db.session.execute(
+        text("UPDATE strategy_legs SET status='EXECUTING' WHERE id=:id AND status IN ('PENDING','ARMED')"),
+        {"id": leg_id},
+    )
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def _mark_leg(leg_id, status, tx_hash=None):
+    leg = StrategyLeg.query.get(leg_id)
+    if leg:
+        leg.status = status
+        if tx_hash:
+            leg.tx_hash = tx_hash
+        if status == 'EXECUTED':
+            leg.executed_at = datetime.utcnow()
+        db.session.commit()
+
+
+def run_leg_execution(leg_dict, strategy_dict, current_price):
+    """Execute ONE leg of a multi-leg strategy on-chain.
+
+    A leg is structurally identical to a single-strategy trade — spend exactly one (slice) note
+    and swap — so it reuses the full `execute_evm_trade` withdraw→swap→(vault re-deposit) path,
+    but with the LEG's own amount, ZK proof, and nullifier. N legs therefore yield N independent
+    withdraw+swap txs with N distinct nullifiers; one note is never spent twice.
+
+    Returns { "status": "EXECUTED"|"FAILED", "tx_hash": str|None }.
+    """
+    leg_id = leg_dict['id']
+    sid    = strategy_dict['id']
+
+    # Per-leg atomic guard (prevents two cycles firing the same leg).
+    if not _claim_leg(leg_id):
+        print(f"[Executor] Leg {leg_id} not claimable — another cycle owns it; aborting")
+        return {"status": "FAILED", "tx_hash": None}
+
+    nullifier_hash = _get_nullifier_hash(leg_dict)  # reads leg_dict['zkp_data']
+
+    # Atomic nullifier claim (double-spend guard, same registry as single-strategy path).
+    if nullifier_hash:
+        if not _claim_nullifier(nullifier_hash, leg_dict.get('commitment_id')):
+            print(f"[Executor] Leg {leg_id} — nullifier already claimed, aborting double-spend")
+            _mark_leg(leg_id, 'FAILED')
+            return {"status": "FAILED", "tx_hash": None}
+
+    def _on_withdraw_confirmed(_tx_hash):
+        if nullifier_hash:
+            _mark_nullifier_spent(nullifier_hash)
+
+    # Synthesize a single-trade strategy dict from parent + this leg: leg supplies amount + proof;
+    # parent supplies assets, chains, recipient, and output routing.
+    leg_strategy = dict(strategy_dict)
+    leg_strategy.update({
+        'amount':   leg_dict['amount'],
+        'zkp_data': leg_dict.get('zkp_data'),
+        # a vault-mode leg re-deposits its slice output under its own precommitment if provided
+        'output_precommitment': leg_dict.get('output_precommitment') or strategy_dict.get('output_precommitment'),
+        'is_private': True,
+    })
+
+    t_exec = time.monotonic()
+    try:
+        tx_hash = execute_private_withdrawal(
+            leg_strategy, current_price, on_withdraw_confirmed=_on_withdraw_confirmed
+        )
+    except NullifierSpentSwapFailed as swap_fatal:
+        print(f"[Executor] ⚠️  leg {leg_id}: withdraw confirmed but swap failed: {swap_fatal}")
+        _mark_leg(leg_id, 'FAILED')
+        if nullifier_hash:
+            _mark_nullifier_spent(nullifier_hash)  # spent on-chain — never reuse
+        return {"status": "FAILED", "tx_hash": None}
+    except FatalExecutionError as fatal:
+        print(f"[Executor] ❌ leg {leg_id} fatal: {fatal}")
+        _mark_leg(leg_id, 'FAILED')
+        if nullifier_hash:
+            if "NullifierAlreadySpent" in str(fatal):
+                _mark_nullifier_spent(nullifier_hash)
+            else:
+                _release_nullifier(nullifier_hash)
+        return {"status": "FAILED", "tx_hash": None}
+
+    exec_ms = (time.monotonic() - t_exec) * 1000
+    print(f"[Executor] Leg {leg_id} took {exec_ms:.0f}ms | tx_hash={tx_hash}")
+
+    if tx_hash:
+        _mark_leg(leg_id, 'EXECUTED', tx_hash=tx_hash)
+        if nullifier_hash:
+            _mark_nullifier_spent(nullifier_hash)
+        return {"status": "EXECUTED", "tx_hash": tx_hash}
+
+    _mark_leg(leg_id, 'FAILED')
+    if nullifier_hash:
+        _release_nullifier(nullifier_hash)
+    return {"status": "FAILED", "tx_hash": None}

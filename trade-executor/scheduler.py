@@ -1,12 +1,12 @@
 import time
 from datetime import datetime
-from database import db, Strategy, get_server_key
+from database import db, Strategy, StrategyLeg, get_server_key
 from oracle import get_live_prices
-from fhe_client import get_encrypted_result
+from fhe_client import get_encrypted_result, get_encrypted_leg_result
 from condition_evaluator import evaluate_tree_encrypted
 from config import CHECK_INTERVAL_SECONDS, PYTH_PRICE_FEED_IDS, DECRYPTOR_URL
 from decryptor_client import decrypt_trigger, decryptor_enabled
-from executor_runner import run_execution
+from executor_runner import run_execution, run_leg_execution
 
 
 def _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price):
@@ -17,6 +17,73 @@ def _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price):
     if eth_feed_id and eth_feed_id in live_prices:
         return eth_price
     return sol_price
+
+
+def _process_multi_leg(strategy_dict, current_price, server_key, user_id):
+    """Evaluate + (in TEE mode) fire each eligible leg of a TWAP/Grid strategy independently.
+
+    Each leg is a fully shielded sub-trade: it has its own encrypted trigger (price band for a
+    grid rung, encrypted fire-time for a TWAP slice), its own slice-note ZK proof, and its own
+    nullifier. A leg fires only when its OWN encrypted condition decrypts to TRUE inside the
+    TEE, so a TWAP of N slices yields N independent withdraw+swap txs with N distinct nullifiers.
+    The parent strategy becomes EXECUTED only once every leg has completed.
+    """
+    sid = strategy_dict.get('id')
+    legs = StrategyLeg.query.filter(
+        StrategyLeg.strategy_id == sid,
+        StrategyLeg.status.in_(['PENDING', 'ARMED']),
+    ).order_by(StrategyLeg.leg_index).all()
+
+    now_ts = int(time.time())
+    for leg in legs:
+        leg_dict = leg.to_dict()
+        enc_result = get_encrypted_leg_result(leg_dict, current_price, server_key, now_ts=now_ts)
+        if not enc_result:
+            continue
+
+        # Store the per-leg encrypted result (browser arming path can decrypt this too).
+        leg.encrypted_result = enc_result
+        leg.result_updated_at = datetime.utcnow()
+        if leg.status == 'PENDING':
+            leg.status = 'ARMED'
+        db.session.commit()
+
+        if not (decryptor_enabled() and enc_result):
+            continue  # arming-only mode: leave it for the browser to authorize
+
+        triggered, dec_err = decrypt_trigger(user_id, enc_result)
+        if dec_err:
+            print(f"[Scheduler] Decryptor error for {sid} leg {leg.leg_index}: {dec_err}")
+            continue
+        if not triggered:
+            continue
+
+        # Re-fetch the leg — its status may have changed during decryption.
+        leg = StrategyLeg.query.get(leg.id)
+        if not leg or leg.status in ('EXECUTED', 'FAILED', 'EXECUTING'):
+            continue
+        print(f"[Scheduler] TEE trigger=TRUE for {sid} leg {leg.leg_index} — executing on-chain…")
+        try:
+            result = run_leg_execution(leg.to_dict(), strategy_dict, current_price)
+            print(f"[Scheduler] {sid} leg {leg.leg_index} executed | {result}")
+        except Exception as exec_err:
+            print(f"[Scheduler] Execution failed for {sid} leg {leg.leg_index}: {exec_err}")
+
+    # Mark the parent EXECUTED once all legs are done; FAILED if any leg failed and none remain.
+    strat = Strategy.query.get(sid)
+    if strat:
+        remaining = StrategyLeg.query.filter(
+            StrategyLeg.strategy_id == sid,
+            StrategyLeg.status.in_(['PENDING', 'ARMED', 'EXECUTING']),
+        ).count()
+        done = StrategyLeg.query.filter_by(strategy_id=sid, status='EXECUTED').count()
+        strat.executed_count = done
+        if remaining == 0 and strat.status not in ('EXECUTED', 'FAILED'):
+            failed = StrategyLeg.query.filter_by(strategy_id=sid, status='FAILED').count()
+            strat.status = 'EXECUTED' if done > 0 else 'FAILED'
+            if failed:
+                print(f"[Scheduler] {sid} complete: {done} legs executed, {failed} failed")
+        db.session.commit()
 
 
 def worker_loop(app):
@@ -66,6 +133,11 @@ def worker_loop(app):
                             continue
 
                         current_price = _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price)
+
+                        # Multi-leg (TWAP / RANGE_GRID): evaluate + fire each leg independently.
+                        if strategy_dict.get('leg_count'):
+                            _process_multi_leg(strategy_dict, current_price, server_key, user_id)
+                            continue
 
                         t_fhe = time.monotonic()
                         condition_tree = strategy_dict.get('condition_tree')

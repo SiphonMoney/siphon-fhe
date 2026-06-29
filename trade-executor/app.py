@@ -3,7 +3,7 @@ from flask_cors import CORS
 import threading
 import os
 import json
-from database import db, Strategy, UserFheKey, get_server_key
+from database import db, Strategy, StrategyLeg, UserFheKey, get_server_key
 from note_db import init_note_db
 from scheduler import worker_loop
 from config import DATABASE_URI, PYTH_PRICE_FEED_IDS
@@ -101,6 +101,23 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
                 ]:
                     try:
                         conn.execute(text(f"ALTER TABLE strategy ADD COLUMN {col} {typedef} DEFAULT ''"))
+                        conn.commit()
+                    except Exception:
+                        pass  # column already exists
+
+                # Multi-leg (TWAP / RANGE_GRID) columns — proper NULL/0 defaults (not '').
+                for col, typedef in [
+                    ("leg_count", "INTEGER"),
+                    ("interval_sec", "INTEGER"),
+                    ("grid_levels", "INTEGER"),
+                    ("max_slippage_bps", "INTEGER"),
+                    ("start_delay_sec", "INTEGER"),
+                    ("executed_count", "INTEGER DEFAULT 0"),
+                    ("eval_mode", "VARCHAR(10)"),
+                    ("schedule_anchor", "INTEGER"),
+                ]:
+                    try:
+                        conn.execute(text(f"ALTER TABLE strategy ADD COLUMN {col} {typedef}"))
                         conn.commit()
                     except Exception:
                         pass  # column already exists
@@ -232,6 +249,13 @@ def create_strategy():
         # Support condition_tree (new) OR legacy upper/lower bound (old)
         condition_tree = data.get('condition_tree')
 
+        # Multi-leg strategies (TWAP / RANGE_GRID) carry a `legs` array: each leg is an
+        # independent shielded sub-trade with its own slice-note ZK proof + encrypted trigger.
+        legs = data.get('legs') or []
+        is_multi_leg = strategy_type in ('TWAP', 'RANGE_GRID') and len(legs) > 0
+        # 'time' for TWAP (encrypted fire-time triggers), 'price' for grid (encrypted price band).
+        eval_mode = 'time' if strategy_type == 'TWAP' else ('price' if strategy_type == 'RANGE_GRID' else None)
+
         new_strategy = Strategy(
             user_id=data['user_id'],
             strategy_type=strategy_type,
@@ -247,11 +271,53 @@ def create_strategy():
             from_chain=from_chain,
             output_mode=data.get('output_mode', 'address'),
             output_precommitment=data.get('output_precommitment'),
+            # multi-leg schedule/ladder metadata
+            leg_count=(len(legs) if is_multi_leg else None),
+            interval_sec=data.get('interval_sec'),
+            grid_levels=data.get('grid_levels'),
+            max_slippage_bps=data.get('max_slippage_bps'),
+            start_delay_sec=data.get('start_delay_sec'),
+            executed_count=0,
+            eval_mode=eval_mode,
+            schedule_anchor=data.get('schedule_anchor'),
         )
-        
+
         db.session.add(new_strategy)
+        db.session.flush()  # assign new_strategy.id before inserting child legs
+
+        # Persist each leg as a StrategyLeg row. Each leg carries its own per-leg withdrawal
+        # proof (zk_proof) and encrypted trigger bound. Missing/partial legs are rejected so a
+        # multi-leg order can never silently degrade to fewer legs.
+        if is_multi_leg:
+            for i, leg in enumerate(legs):
+                leg_proof = leg.get('zk_proof') or leg.get('zkp_data')
+                nh = None
+                if isinstance(leg_proof, dict):
+                    nhs = leg_proof.get('nullifierHashes') or leg_proof.get('nullifier_hashes')
+                    if isinstance(nhs, list) and nhs:
+                        nh = str(nhs[0])
+                    elif leg_proof.get('nullifierHash') is not None:
+                        nh = str(leg_proof.get('nullifierHash'))
+                db.session.add(StrategyLeg(
+                    strategy_id=new_strategy.id,
+                    leg_index=leg.get('leg_index', i),
+                    amount=leg['amount'],
+                    side=leg.get('side'),
+                    eval_mode=leg.get('eval_mode', eval_mode or 'price'),
+                    target_price=leg.get('target_price'),
+                    encrypted_upper_bound=leg.get('encrypted_upper_bound'),
+                    encrypted_lower_bound=leg.get('encrypted_lower_bound'),
+                    zkp_data=json.dumps(leg_proof) if leg_proof else None,
+                    nullifier_hash=nh,
+                    status='PENDING',
+                ))
+
         db.session.commit()
-        return jsonify({"status": "success", "strategy_id": new_strategy.id}), 201
+        return jsonify({
+            "status": "success",
+            "strategy_id": new_strategy.id,
+            "leg_count": new_strategy.leg_count,
+        }), 201
 
     except Exception as e:
         print(f"Error creating strategy: {e}")

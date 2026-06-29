@@ -107,6 +107,29 @@ class Strategy(db.Model):
     output_mode          = db.Column(db.String(20), nullable=False, default='address')
     output_precommitment = db.Column(db.String(80), nullable=True)
 
+    # --- Multi-leg strategies (TWAP / RANGE_GRID) ------------------------------------------
+    # A TWAP/Grid order is a parent Strategy with N child StrategyLeg rows, each an independent
+    # shielded leg (its own slice note, ZK proof, nullifier, and encrypted trigger). The columns
+    # below describe the schedule/ladder; per-leg data lives in StrategyLeg.
+    #   leg_count        — number of legs (TWAP slices / grid rungs)
+    #   interval_sec     — TWAP cadence between slices (seconds)
+    #   grid_levels      — grid rung count (mirrors leg_count for RANGE_GRID)
+    #   max_slippage_bps — per-leg slippage cap
+    #   start_delay_sec  — delay before the first leg becomes eligible
+    #   executed_count   — legs that have completed; strategy is EXECUTED when == leg_count
+    #   eval_mode        — 'price' (grid rung price triggers) | 'time' (TWAP encrypted fire-time)
+    leg_count        = db.Column(db.Integer, nullable=True)
+    interval_sec     = db.Column(db.Integer, nullable=True)
+    grid_levels      = db.Column(db.Integer, nullable=True)
+    max_slippage_bps = db.Column(db.Integer, nullable=True)
+    start_delay_sec  = db.Column(db.Integer, nullable=True)
+    executed_count   = db.Column(db.Integer, nullable=False, default=0)
+    eval_mode        = db.Column(db.String(10), nullable=True)  # 'price' | 'time'
+    # Anchor time (unix seconds) the TWAP fire-times were computed against, so the executor can
+    # reconstruct/verify schedule offsets. Plaintext is fine: it's just "when the order started",
+    # the same instant the creation tx is already publicly timestamped on-chain.
+    schedule_anchor  = db.Column(db.Integer, nullable=True)
+
     # Timestamps
     created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -137,9 +160,81 @@ class Strategy(db.Model):
             'from_chain': self.from_chain,
             'output_mode': self.output_mode,
             'output_precommitment': self.output_precommitment,
+            'leg_count': self.leg_count,
+            'interval_sec': self.interval_sec,
+            'grid_levels': self.grid_levels,
+            'max_slippage_bps': self.max_slippage_bps,
+            'start_delay_sec': self.start_delay_sec,
+            'executed_count': self.executed_count,
+            'eval_mode': self.eval_mode,
+            'schedule_anchor': self.schedule_anchor,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class StrategyLeg(db.Model):
+    """One independent leg of a multi-leg strategy (TWAP slice / grid rung).
+
+    Each leg is a fully shielded sub-trade: its own slice note (from Vault.split), its own
+    multi-note withdrawal ZK proof + nullifier set, its own encrypted trigger, and its own
+    swap. Legs are evaluated and fired independently by the scheduler/executor, so a TWAP of N
+    slices produces N withdraw+swap txs with N distinct nullifiers — never reusing one note.
+
+    Privacy: a grid leg triggers on an encrypted PRICE band (FHE GTE/LTE vs the public price);
+    a TWAP leg triggers on an encrypted FIRE-TIME (FHE LTE vs the public current unix time), so
+    the cadence stays hidden in ciphertext exactly like a price threshold does — never stored
+    in plaintext on the server."""
+    __tablename__ = 'strategy_legs'
+    id          = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    strategy_id = db.Column(db.String, db.ForeignKey('strategy.id'), nullable=False, index=True)
+    leg_index   = db.Column(db.Integer, nullable=False)
+    amount      = db.Column(db.Float, nullable=False)               # per-leg amount (asset_in units)
+    side        = db.Column(db.String(12), nullable=True)           # LIMIT_BUY | LIMIT_SELL (grid)
+    eval_mode   = db.Column(db.String(10), nullable=False, default='price')  # 'price' | 'time'
+    target_price = db.Column(db.Float, nullable=True)               # grid rung price (reference)
+
+    # Per-leg encrypted trigger bound (FHE ciphertext, compressed at rest):
+    #   grid: rung price band (lower for buy rung / upper for sell rung)
+    #   twap: encrypted fire-time (seconds); fires when current_time >= fire_time
+    encrypted_upper_bound = db.Column(CompressedText, nullable=True)
+    encrypted_lower_bound = db.Column(CompressedText, nullable=True)
+    encrypted_result      = db.Column(CompressedText, nullable=True)
+    result_updated_at     = db.Column(DateTime, nullable=True)
+
+    # Per-leg multi-note withdrawal proof (JSON). Holds pA/pB/pC, stateRoot, nullifierHashes[],
+    # changeCommitment, and swap-binding signals — one note (slice) spent per leg.
+    zkp_data       = db.Column(CompressedText, nullable=True)
+    nullifier_hash = db.Column(db.String(80), nullable=True, index=True)  # first nullifier (claim/dedup)
+
+    status      = db.Column(db.String, default='PENDING', nullable=False, index=True)
+    tx_hash     = db.Column(db.String, nullable=True)
+    executed_at = db.Column(DateTime, nullable=True)
+    created_at  = db.Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    strategy = db.relationship('Strategy', backref=db.backref('legs', lazy='dynamic', order_by='StrategyLeg.leg_index'))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'strategy_id': self.strategy_id,
+            'leg_index': self.leg_index,
+            'amount': self.amount,
+            'side': self.side,
+            'eval_mode': self.eval_mode,
+            'target_price': self.target_price,
+            'encrypted_upper_bound': self.encrypted_upper_bound,
+            'encrypted_lower_bound': self.encrypted_lower_bound,
+            'encrypted_result': self.encrypted_result,
+            'result_updated_at': self.result_updated_at.isoformat() if self.result_updated_at else None,
+            'zkp_data': json.loads(self.zkp_data) if self.zkp_data and isinstance(self.zkp_data, str) else self.zkp_data,
+            'nullifier_hash': self.nullifier_hash,
+            'status': self.status,
+            'tx_hash': self.tx_hash,
+            'executed_at': self.executed_at.isoformat() if self.executed_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
 
 class Note(db.Model):
     __tablename__ = 'notes'

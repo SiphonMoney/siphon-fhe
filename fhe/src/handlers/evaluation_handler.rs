@@ -17,6 +17,11 @@ pub struct EvaluationPayload {
     encrypted_lower_bound: String,
     server_key: String,
     current_price_cents: u64,  // u64 — u32 overflows at ~$42k (BTC/ETH prices)
+    // Public current unix time (seconds). Used by TWAP_SLICE to compare against an encrypted
+    // fire-time so a TWAP slice's schedule stays in ciphertext (never plaintext on the server).
+    // Defaults to 0 for older clients / price-only strategies.
+    #[serde(default)]
+    current_time: u64,
 }
 
 #[derive(Serialize)]
@@ -115,6 +120,19 @@ pub async fn evaluate_strategy(
                 Ok(v) => v, Err(e) => return bad(StatusCode::BAD_REQUEST, e),
             };
             match fhe_core::homomorphic_check(&server_key, &enc_upper, "GTE", price) {
+                Ok(v) => v, Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, e),
+            }
+        },
+        // TWAP slice: time trigger, not price. The encrypted_lower_bound holds this slice's
+        // fire-time (unix seconds), encrypted under the user's key. We fire when the *public*
+        // current time has reached it — `enc_fire_time <= current_time` — which is exactly the
+        // "GTE" comparison (bound <= scalar) but with current_time as the scalar instead of
+        // price. The cadence therefore stays hidden in ciphertext, like a price threshold.
+        "TWAP_SLICE" => {
+            let enc_fire_time: RadixCiphertext = match deserialize_hex(&payload.encrypted_lower_bound, "fire_time") {
+                Ok(v) => v, Err(e) => return bad(StatusCode::BAD_REQUEST, e),
+            };
+            match fhe_core::homomorphic_check(&server_key, &enc_fire_time, "GTE", payload.current_time) {
                 Ok(v) => v, Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, e),
             }
         },
