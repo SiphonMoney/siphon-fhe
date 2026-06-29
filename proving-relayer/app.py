@@ -1,7 +1,6 @@
 import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from wallet_auth import verify_wallet_sig
 from prover import generate_proof
 from config import PORT, VALID_CIRCUITS
 
@@ -15,8 +14,7 @@ def health():
 
 
 @app.route('/prove', methods=['POST'])
-@verify_wallet_sig
-def prove(wallet):
+def prove():
     data    = request.json or {}
     inputs  = data.get('inputs')
     circuit = data.get('circuit', '').lower()
@@ -35,7 +33,7 @@ def prove(wallet):
         return jsonify({'error': str(e)}), 500
 
     elapsed_ms = (time.monotonic() - t0) * 1000
-    print(f"[Benchmark] circuit={circuit} proof={elapsed_ms:.1f}ms wallet={wallet[:10]}...")
+    print(f"[Benchmark] circuit={circuit} proof={elapsed_ms:.1f}ms")
     return jsonify({**result, 'elapsed_ms': elapsed_ms}), 200
 
 
