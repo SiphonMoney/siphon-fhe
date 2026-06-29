@@ -49,6 +49,30 @@ services:
       - SOLANA_NETWORK=${SOLANA_NETWORK:-devnet}
       - EXECUTOR_PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
       - DECRYPTOR_URL=${DECRYPTOR_URL:-http://decryptor:5002}
+      # --- required by config.py (raises if missing) ---
+      # Reuse the local postgres for the note/nullifier DB (no Supabase needed for local dev).
+      - NOTE_DB_URI=${NOTE_DB_URI:-postgresql://siphon:siphon_secure_pass@postgres:5432/siphon_strategies}
+      - SERVER_HMAC_SECRET=${SERVER_HMAC_SECRET:-localdev_hmac_secret_change_me}
+      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY:-localdev_db_encryption_key_change_me}
+      - API_TOKEN=${API_TOKEN:-testtoken123}
+      # Self-referential base URL — executor_runner calls its OWN /nullifier-registry (port 5005,
+      # NOT the 5002 default which is the decryptor!).
+      - TRADE_EXECUTOR_BASE_URL=http://localhost:5005
+      - CHECK_INTERVAL_SECONDS=${CHECK_INTERVAL_SECONDS:-10}
+      # --- ETH Sepolia (upgraded TWAP/grid contracts) ---
+      - ETH_SEPOLIA_RPC=${ETH_SEPOLIA_RPC:-https://ethereum-sepolia-rpc.publicnode.com}
+      - ETH_SEPOLIA_ENTRYPOINT=${ETH_SEPOLIA_ENTRYPOINT:-0x342326835884b65C27c00249506dA440590FFb6f}
+      - ETH_SEPOLIA_UNISWAP_V3_ROUTER=${ETH_SEPOLIA_UNISWAP_V3_ROUTER:-}
+      - ETH_SEPOLIA_UNISWAP_V3_FACTORY=${ETH_SEPOLIA_UNISWAP_V3_FACTORY:-}
+      - ETH_SEPOLIA_WETH=${ETH_SEPOLIA_WETH:-}
+      - ETH_SEPOLIA_USDC=${ETH_SEPOLIA_USDC:-}
+      # Funded Sepolia signer the proofs are bound to (MUST equal the frontend's
+      # NEXT_PUBLIC_ETH_SEPOLIA_EXECUTOR_ADDRESS). No 0x prefix needed.
+      - ETH_SEPOLIA_EXECUTOR_KEY=${ETH_SEPOLIA_EXECUTOR_KEY:-}
+      # --- admin allow-list (Sepolia is gated) ---
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-}
+      - ADMIN_GATED_CHAIN_IDS=${ADMIN_GATED_CHAIN_IDS:-11155111}
+      - ETH_SEPOLIA_ADMIN_WALLETS=${ETH_SEPOLIA_ADMIN_WALLETS:-0xd5720Ed6e70a128C025D0C284874cd1e33B39688,0x9790a76b15612Cd9323dca3EA3E81E50aAC09090,0xc5b7b574EE84A9B59B475FE32Eaf908C246d3859}
     volumes:
       - trade-executor-data:/app/data
     depends_on:
