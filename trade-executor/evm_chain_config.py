@@ -65,7 +65,9 @@ _CHAIN_DEFAULTS: Dict[int, EvmChainConfig] = {
         chain_id=11155111,
         name="Ethereum Sepolia",
         rpc_url="https://ethereum-sepolia-rpc.publicnode.com",
-        entrypoint="0x867e9C195eB85960c390D4a7A64F4e16905D6638",
+        # Upgraded TWAP/grid stack (split + multi-note verifiers, permanent root history).
+        # Deployed 2026-06-30, block 11168257. Old single-note entrypoint: 0x867e9C19…
+        entrypoint="0x342326835884b65C27c00249506dA440590FFb6f",
         # SimpleSwapRouter (exactInputSingleWithETH), not Universal Router execute().
         uniswap_v3_router="0x5D49f98ea31bfa7B41473Bc034BCA56B659C11A3",
         uniswap_v3_factory="0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
