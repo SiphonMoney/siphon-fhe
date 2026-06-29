@@ -1,13 +1,18 @@
 # siphon-decryptor — runs in a Phala Cloud confidential VM (dstack / Intel TDX, linux/amd64).
 # Holds ClientKeys in enclave memory; decrypts only the FHE result bit.
+#
+# Platform: builds for the HOST platform by default (native arm64 on Apple-Silicon dev machines,
+# amd64 on CI/EC2). The Phala TDX runtime is linux/amd64 — build the deployment image with
+# `docker build --platform=linux/amd64 .` (or `docker buildx build --platform=linux/amd64`).
+# Do NOT hardcode --platform here, or local arm64 dev falls back to slow QEMU emulation.
 
-FROM --platform=linux/amd64 rust:1.83-bookworm AS builder
+FROM rust:1.83-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 RUN cargo build --release
 
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/siphon-decryptor /usr/local/bin/siphon-decryptor
