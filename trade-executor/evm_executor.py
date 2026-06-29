@@ -41,7 +41,7 @@ def get_evm_executor_private_key(chain_id: int) -> str:
 TOKEN_DECIMALS = {"ETH": 18, "USDC": 6, "USDT": 6, "WBTC": 8}
 
 # Minimal ABIs
-ENTRYPOINT_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_precommitment","type":"uint256"}],"name":"deposit","outputs":[{"internalType":"uint256","name":"_commitment","type":"uint256"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256","name":"_nullifier","type":"uint256"},{"internalType":"uint256","name":"_newCommitment","type":"uint256"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"verify","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"}]')
+ENTRYPOINT_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"address","name":"_recipient","type":"address"},{"internalType":"uint256","name":"_withdrawnValue","type":"uint256"},{"internalType":"uint256","name":"_stateRoot","type":"uint256"},{"internalType":"uint256[]","name":"_nullifierHashes","type":"uint256[]"},{"internalType":"uint256","name":"_changeCommitment","type":"uint256"},{"internalType":"uint256[2]","name":"_pA","type":"uint256[2]"},{"internalType":"uint256[2][2]","name":"_pB","type":"uint256[2][2]"},{"internalType":"uint256[2]","name":"_pC","type":"uint256[2]"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_asset","type":"address"},{"internalType":"uint256","name":"_amount","type":"uint256"},{"internalType":"uint256","name":"_precommitment","type":"uint256"}],"name":"deposit","outputs":[{"internalType":"uint256","name":"_commitment","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
 
 # Custom error selectors for Vault/Entrypoint
 CUSTOM_ERRORS = {
@@ -279,6 +279,28 @@ def _resolve_v3_pool(
     )
 
 
+def _extract_nullifier_hash(zk_proof: dict) -> str:
+    """Extract the single nullifier hash the contract expects.
+
+    Frontend sends nullifierHashes[] (array) from the multi-note circuit.
+    The deployed Entrypoint takes a single _nullifier — use index [0].
+    Fallback to the singular nullifierHash field for backward compatibility.
+    """
+    hashes = zk_proof.get("nullifierHashes")
+    if hashes and isinstance(hashes, list) and len(hashes) > 0:
+        return str(hashes[0])
+    return str(zk_proof.get("nullifierHash", ""))
+
+
+def _extract_change_commitment(zk_proof: dict) -> str:
+    """Extract the change commitment.
+
+    Frontend sends changeCommitment (circuit output). newCommitment is an alias
+    kept for backward compatibility with older proof shapes.
+    """
+    return str(zk_proof.get("changeCommitment") or zk_proof.get("newCommitment", ""))
+
+
 def zk_withdraw_from_vault(
     w3: Web3,
     account,
@@ -290,7 +312,7 @@ def zk_withdraw_from_vault(
 ) -> str:
     """
     Call Entrypoint.withdraw() with the ZK proof to pull funds out of the vault.
-    zk_proof must contain: stateRoot, nullifierHash, newCommitment, pA, pB, pC
+    zk_proof must contain: stateRoot, nullifierHashes (array), changeCommitment, pA, pB, pC
     """
     print(f"   [EVM] ZK withdraw on {chain.name} ({chain.chain_id}): {amount_wei} wei of {asset_address} → {recipient}")
 
@@ -299,30 +321,41 @@ def zk_withdraw_from_vault(
         abi=ENTRYPOINT_ABI,
     )
 
+    nullifier_hash   = _extract_nullifier_hash(zk_proof)
+    change_commitment = _extract_change_commitment(zk_proof)
+
+    if not nullifier_hash:
+        raise FatalExecutionError("zk_proof missing nullifierHashes / nullifierHash")
+    if not change_commitment:
+        raise FatalExecutionError("zk_proof missing changeCommitment / newCommitment")
+
     # Parse proof components — stored as string arrays in the DB
     pA = [int(x) for x in zk_proof["pA"]]
     pB = [[int(x) for x in row] for row in zk_proof["pB"]]
     pC = [int(x) for x in zk_proof["pC"]]
 
     print(f"   [EVM] Proof components:")
-    print(f"         stateRoot:     {zk_proof['stateRoot']}")
-    print(f"         nullifierHash: {zk_proof['nullifierHash']}")
-    print(f"         newCommitment: {zk_proof['newCommitment']}")
+    print(f"         stateRoot:        {zk_proof['stateRoot']}")
+    print(f"         nullifierHash[0]: {nullifier_hash}")
+    print(f"         changeCommitment: {change_commitment}")
     print(f"         pA: {pA}")
     print(f"         pB: {pB}")
     print(f"         pC: {pC}")
 
+    # All nullifier hashes as a list (contract takes uint256[])
+    nullifier_hashes_list = [int(nullifier_hash)]
+
     # Dry-run via raw JSON-RPC eth_call (web3.py misreads void-returning functions)
     import requests as _req
     _withdraw_sel = Web3.keccak(
-        text="withdraw(address,address,uint256,uint256,uint256,uint256,uint256[2],uint256[2][2],uint256[2])"
+        text="withdraw(address,address,uint256,uint256,uint256[],uint256,uint256[2],uint256[2][2],uint256[2])"
     )[:4]
     from eth_abi import encode as _enc
     _calldata = _withdraw_sel + _enc(
-        ["address","address","uint256","uint256","uint256","uint256","uint256[2]","uint256[2][2]","uint256[2]"],
+        ["address","address","uint256","uint256","uint256[]","uint256","uint256[2]","uint256[2][2]","uint256[2]"],
         [Web3.to_checksum_address(asset_address), Web3.to_checksum_address(recipient),
-         amount_wei, int(zk_proof["stateRoot"]), int(zk_proof["nullifierHash"]),
-         int(zk_proof["newCommitment"]), pA, pB, pC]
+         amount_wei, int(zk_proof["stateRoot"]), nullifier_hashes_list,
+         int(change_commitment), pA, pB, pC]
     )
     t_dryrun = time.monotonic()
     _resp = _req.post(chain.rpc_url, json={
@@ -349,8 +382,8 @@ def zk_withdraw_from_vault(
         Web3.to_checksum_address(recipient),
         amount_wei,
         int(zk_proof["stateRoot"]),
-        int(zk_proof["nullifierHash"]),
-        int(zk_proof["newCommitment"]),
+        nullifier_hashes_list,
+        int(change_commitment),
         pA,
         pB,
         pC,
@@ -682,7 +715,8 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
             return None
 
         decimals_in = TOKEN_DECIMALS.get(asset_in, 18)
-        amount_wei  = int(amount * (10 ** decimals_in))
+        from decimal import Decimal, ROUND_DOWN
+        amount_wei  = int(Decimal(str(amount)) * Decimal(10 ** decimals_in))
 
         if amount_wei <= 0:
             print(f"   [EVM] ❌ Invalid amount: {amount}")

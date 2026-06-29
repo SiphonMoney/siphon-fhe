@@ -33,12 +33,20 @@ def _executor_headers():
 
 
 def _get_nullifier_hash(strategy_dict) -> str | None:
-    """Extract nullifierHash from zkp_data, or None if not a private strategy."""
+    """Extract the primary nullifier hash from zkp_data for the double-spend guard.
+
+    Frontend sends nullifierHashes[] (array) — use [0]. Falls back to the singular
+    nullifierHash field for backward compatibility.
+    """
     zkp = strategy_dict.get('zkp_data')
     if not zkp:
         return None
     try:
         zk = zkp if isinstance(zkp, dict) else json.loads(zkp)
+        hashes = zk.get('nullifierHashes')
+        if hashes and isinstance(hashes, list) and len(hashes) > 0:
+            nh = str(hashes[0])
+            return nh if nh else None
         nh = str(zk.get('nullifierHash', ''))
         return nh if nh else None
     except Exception as e:
