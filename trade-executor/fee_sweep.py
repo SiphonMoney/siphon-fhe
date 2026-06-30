@@ -7,6 +7,7 @@ The protocol later withdraws these notes itself (it holds the nullifier/secret).
 
 Manual/admin-triggered until validated; not wired into the auto-scheduler.
 """
+from __future__ import annotations
 import fee_config as fc
 
 TOKEN_DECIMALS = {"ETH": 18, "USDC": 6, "USDT": 6, "WBTC": 8}
