@@ -10,6 +10,10 @@ COPY Cargo.toml ./
 # This command says "Copy Cargo.lock if it exists, otherwise do nothing."
 COPY Cargo.loc[k] ./
 
+# Vendored, patched concrete-fft (referenced by [patch.crates-io]) — must be present before the
+# dependency build below resolves the patch path.
+COPY vendor ./vendor
+
 # Create a dummy main.rs to build dependencies (caching layer)
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
