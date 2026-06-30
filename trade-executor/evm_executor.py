@@ -766,6 +766,25 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
         else:
             print("   [EVM] ℹ️  No zkp_data — executing direct from executor wallet")
 
+        # ── Protocol fee (Part B: execution fee) ──────────────────────────────────────────────
+        # Deducted in the INPUT asset from the amount the executor now custodies. The fee simply
+        # STAYS in the executor wallet (zero extra gas) and is recorded as a FeeAccrual for a later
+        # sweep into the Siphon fee-vault (accrue-then-sweep). The user receives net = amount - fee.
+        net_wei = amount_wei
+        try:
+            from fee_calc import compute_execution_fee_wei
+            fee_wei = compute_execution_fee_wei(amount_wei, decimals_in, float(current_price or 0))
+            if fee_wei > 0:
+                net_wei = amount_wei - fee_wei
+                print(f"   [Fee] Execution fee = {fee_wei} wei {asset_in} "
+                      f"(net {net_wei}); retained in executor wallet for fee-vault sweep")
+                from fee_ledger import record_fee
+                record_fee(exec_chain_id, asset_in, fee_wei, kind='execution',
+                           strategy_id=strategy.get('id'))
+        except Exception as fee_err:
+            print(f"   [Fee] ⚠️ fee skipped (executing full amount): {fee_err}")
+            net_wei = amount_wei
+
         # Step 2: cross-chain → Li.Fi; same-chain swap → Uniswap; same asset → direct transfer
         t_swap = time.monotonic()
         try:
@@ -781,7 +800,7 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
                     to_chain=str(to_chain),
                     from_token=from_token,
                     to_token=to_token,
-                    from_amount_wei=amount_wei,
+                    from_amount_wei=net_wei,
                     recipient=recipient,
                     rpc_url=chain.rpc_url,
                 )
@@ -792,7 +811,7 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
                     # Swap to the executor wallet, then re-deposit the actual output into the
                     # asset_out vault as a private note (Poseidon(amountOut, precommitment)).
                     swap_tx = swap_eth_to_token(
-                        w3, account, chain, token_out_address, amount_wei, account.address
+                        w3, account, chain, token_out_address, net_wei, account.address
                     )
                     print(f"   [EVM] Swap tx (to executor): {swap_tx}")
                     # Read the exact amount delivered from the swap receipt (Transfer event) — robust
@@ -809,10 +828,10 @@ def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirme
                         w3, account, chain, token_out_address, received, int(output_precommitment)
                     )
                 else:
-                    tx_hash = swap_eth_to_token(w3, account, chain, token_out_address, amount_wei, recipient)
+                    tx_hash = swap_eth_to_token(w3, account, chain, token_out_address, net_wei, recipient)
                     print(f"   [Benchmark] [uniswap_swap_total]          = {(time.monotonic()-t_swap)*1000:.0f}ms")
             else:
-                tx_hash = transfer_eth(w3, account, recipient, amount_wei)
+                tx_hash = transfer_eth(w3, account, recipient, net_wei)
                 print(f"   [Benchmark] [direct_transfer_total]       = {(time.monotonic()-t_swap)*1000:.0f}ms")
         except Exception as swap_err:
             if zk_tx:

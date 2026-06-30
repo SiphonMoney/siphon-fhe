@@ -241,6 +241,33 @@ class StrategyLeg(db.Model):
         }
 
 
+class FeeAccrual(db.Model):
+    """A protocol fee accrued in the executor wallet (Part A arming / Part B execution), pending a
+    sweep into the Siphon fee-vault. Accrue-then-sweep keeps tiny per-trade fees from each paying a
+    full deposit's gas. Fees are taken in the INPUT asset, so they accrue per (chain, asset)."""
+    __tablename__ = 'fee_accruals'
+    id          = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    chain_id    = db.Column(db.Integer, nullable=False, index=True)
+    asset       = db.Column(db.String(12), nullable=False)
+    amount_wei  = db.Column(db.String, nullable=False)   # string — wei can exceed BIGINT range
+    kind        = db.Column(db.String(12), nullable=False)   # 'execution' | 'arming'
+    strategy_id = db.Column(db.String, nullable=True, index=True)
+    leg_id      = db.Column(db.String, nullable=True)
+    tx_hash     = db.Column(db.String, nullable=True)   # the trade tx the fee was deducted from
+    swept       = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    sweep_tx    = db.Column(db.String, nullable=True)   # the fee-vault deposit that swept it
+    created_at  = db.Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'chain_id': self.chain_id, 'asset': self.asset,
+            'amount_wei': self.amount_wei, 'kind': self.kind, 'strategy_id': self.strategy_id,
+            'leg_id': self.leg_id, 'tx_hash': self.tx_hash, 'swept': self.swept,
+            'sweep_tx': self.sweep_tx,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Note(db.Model):
     __tablename__ = 'notes'
     id             = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
