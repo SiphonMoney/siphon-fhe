@@ -130,6 +130,10 @@ async fn decrypt(State(st): State<AppState>, Json(req): Json<DecryptReq>) -> Jso
     // The engine encodes the result as a radix integer 1 (true) / 0 (false). NUM_BLOCKS in the
     // engine is 16; decrypt_radix infers from the ciphertext. Non-zero => triggered.
     let value: u64 = ck.decrypt_radix(&ct);
+    // DEBUG: a correct result is 0 or 1. A large/random value means the ClientKey doesn't match
+    // the ServerKey the engine evaluated with (key mismatch), not a comparison/encoding bug.
+    let uid_tail = &req.user_id[req.user_id.len().saturating_sub(6)..];
+    println!("[Decryptor] decrypt user=…{uid_tail} value={value} -> triggered={}", value != 0);
     Json(DecryptResp { triggered: Some(value != 0), error: None })
 }
 
