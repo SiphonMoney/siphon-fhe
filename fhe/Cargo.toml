@@ -6,16 +6,13 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }
-# NOTE: the platform feature must match the build target.
-#   aarch64-unix → Apple Silicon / ARM64 (local dev). REQUIRED here: the x86 seeder_unix path
-#     trips concrete-fft's measure_fastest FFT auto-tuning on ARM, panicking on the first
-#     bootstrap ("cannot convert float seconds to Duration: value is negative").
-#   x86_64-unix  → amd64 (CI / EC2 prod). Swap the platform feature when building there.
+# The tfhe platform backend feature is selected per target_arch in the [target.*] blocks below,
+# so this same Cargo.toml builds on BOTH Apple Silicon (local dev) and x86 (CI / EC2 prod) with no
+# manual edits. aarch64 uses the vendored concrete-fft patch to avoid the FFT auto-tuning panic.
 tfhe = { version = "0.5", features = [
     "boolean",
     "shortint",
     "integer",
-    "aarch64-unix",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,6 +22,14 @@ tower-http = { version = "0.5", features = ["cors"] }
 reqwest = { version = "0.11", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 dotenv = "0.15"
+
+# Platform-specific tfhe CSPRNG/AES backend — unioned with the base tfhe features above. Cargo
+# picks the block matching the build target, so x86 (EC2) gets x86_64-unix and ARM gets aarch64-unix.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+tfhe = { version = "0.5", features = ["x86_64-unix"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+tfhe = { version = "0.5", features = ["aarch64-unix"] }
 # Patch concrete-fft with a clamp in its FFT auto-tuning timing math — the stock 0.4.1 panics
 # on coarse/non-monotonic clocks (Docker on Apple-Silicon) during the first bootstrap. See
 # vendor/concrete-fft/src/ordered.rs (duration_div_f64).
