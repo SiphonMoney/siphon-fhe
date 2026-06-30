@@ -608,7 +608,15 @@ fn measure_fastest(
             let n_runs = min_bench_duration_per_algo.as_secs_f64()
                 / (duration.as_secs_f64() * (n / base_n) as f64);
 
-            let n_runs = n_runs.ceil() as u32;
+            // PATCH (siphon): on coarse/non-monotonic clocks (Docker on Apple-Silicon) `duration`
+            // can measure 0, making n_runs 0/NaN/inf. `duration / n_runs` below then panics with a
+            // divide-by-zero. Clamp to a finite range [1, 1_000_000] so the benchmark stays valid.
+            let n_runs = n_runs.ceil();
+            let n_runs: u32 = if n_runs.is_finite() && n_runs >= 1.0 {
+                (n_runs as u32).min(1_000_000)
+            } else {
+                1
+            };
 
             use std::time::Instant;
             let now = Instant::now();
