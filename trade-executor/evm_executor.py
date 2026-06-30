@@ -655,6 +655,28 @@ def deposit_to_vault(
     return send_tx(w3, account, deposit_tx, label="vault_deposit")
 
 
+def deposit_native_to_vault(
+    w3: Web3,
+    account,
+    chain: EvmChainConfig,
+    amount_wei: int,
+    precommitment: int,
+) -> str:
+    """Deposit native ETH the executor holds into the native Siphon vault as a private note.
+    Payable deposit — no approve; mints Poseidon(amount, precommitment) on-chain. Used by the
+    fee-vault sweep to shield accrued protocol fees."""
+    entrypoint = w3.eth.contract(
+        address=Web3.to_checksum_address(chain.entrypoint),
+        abi=ENTRYPOINT_ABI,
+    )
+    deposit_tx = entrypoint.functions.deposit(
+        Web3.to_checksum_address(NATIVE_ASSET),
+        amount_wei,
+        int(precommitment),
+    ).build_transaction({"from": account.address, "value": amount_wei, "gas": 500_000})
+    return send_tx(w3, account, deposit_tx, label="fee_vault_deposit")
+
+
 def execute_evm_trade(strategy: dict, current_price: float, on_withdraw_confirmed=None) -> Optional[str]:
     """
     Full EVM execution flow:

@@ -384,6 +384,49 @@ def admin_remove_wallet():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/admin/fee-pool', methods=['POST'])
+@require_admin
+def admin_fee_pool():
+    """Upload protocol fee-note precommitments (frontend-generated) for the fee-vault sweep.
+    Body: { chain_id, asset, precommitments: [str,...] }. Idempotent on precommitment uniqueness."""
+    from database import ProtocolFeeNote
+    data = request.json or {}
+    chain_id = data.get('chain_id', 11155111)
+    asset = (data.get('asset') or 'ETH').upper()
+    precs = data.get('precommitments') or []
+    if not isinstance(precs, list) or not precs:
+        return jsonify({"error": "precommitments[] required"}), 400
+    added = 0
+    for p in precs:
+        try:
+            if ProtocolFeeNote.query.filter_by(precommitment=str(p)).first():
+                continue
+            db.session.add(ProtocolFeeNote(chain_id=int(chain_id), asset=asset, precommitment=str(p)))
+            added += 1
+        except Exception:
+            continue
+    db.session.commit()
+    avail = ProtocolFeeNote.query.filter_by(chain_id=int(chain_id), asset=asset, status='available').count()
+    return jsonify({"status": "success", "added": added, "available": avail}), 200
+
+
+@app.route('/admin/sweep-fees', methods=['POST'])
+@require_admin
+def admin_sweep_fees():
+    """Manually trigger a fee-vault sweep for (chain_id, asset). Body: { chain_id, asset, price }."""
+    from fee_sweep import sweep_fees
+    data = request.json or {}
+    chain_id = data.get('chain_id', 11155111)
+    asset = (data.get('asset') or 'ETH').upper()
+    price = data.get('price')
+    try:
+        result = sweep_fees(int(chain_id), asset, float(price) if price else None)
+        return jsonify(result), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/strategies/<user_id>', methods=['GET'])
 def get_user_strategies(user_id):
     """Get all strategies for a user with their execution status and tx_hash."""
