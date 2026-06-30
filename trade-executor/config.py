@@ -94,7 +94,7 @@ ADMIN_WALLET_ENV_SEED = {
 }
 
 # --- Self-referential base URL (executor_runner calls own /nullifier-registry endpoints) ---
-TRADE_EXECUTOR_BASE_URL = os.getenv("TRADE_EXECUTOR_BASE_URL", "http://localhost:5002")
+TRADE_EXECUTOR_BASE_URL = os.getenv("TRADE_EXECUTOR_BASE_URL", "http://localhost:5005")
 
 # --- Token Configuration (Solana) ---
 # Token mint addresses on Solana devnet

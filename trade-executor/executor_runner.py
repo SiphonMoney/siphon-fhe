@@ -22,7 +22,7 @@ from evm_executor import FatalExecutionError, NullifierSpentSwapFailed
 
 _HMAC_SECRET    = os.environ.get('SERVER_HMAC_SECRET', '').encode()
 _API_TOKEN      = os.environ.get('API_TOKEN', '')
-_TRADE_EXECUTOR = os.environ.get('TRADE_EXECUTOR_BASE_URL', 'http://localhost:5002')
+_TRADE_EXECUTOR = os.environ.get('TRADE_EXECUTOR_BASE_URL', 'http://localhost:5005')
 
 
 def _nullifier_hmac(nullifier_hash: str) -> str:
