@@ -34,10 +34,14 @@ def _process_multi_leg(strategy_dict, current_price, server_key, user_id):
         StrategyLeg.status.in_(['PENDING', 'ARMED']),
     ).order_by(StrategyLeg.leg_index).all()
 
-    now_ts = int(time.time())
+    # TWAP fire-times are encoded RELATIVE to the strategy's schedule_anchor (small values:
+    # k*interval), so we compare against elapsed-seconds-since-anchor — not the absolute unix
+    # time (~1.7e9), which is too large for the FHE integer width and is wasteful to compare.
+    anchor = strategy_dict.get('schedule_anchor') or 0
+    elapsed = max(0, int(time.time()) - int(anchor))
     for leg in legs:
         leg_dict = leg.to_dict()
-        enc_result = get_encrypted_leg_result(leg_dict, current_price, server_key, now_ts=now_ts)
+        enc_result = get_encrypted_leg_result(leg_dict, current_price, server_key, now_ts=elapsed)
         if not enc_result:
             continue
 

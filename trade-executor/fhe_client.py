@@ -17,6 +17,12 @@ ENGINE_STRATEGY_TYPE = {
 
 def get_encrypted_result(strategy, current_price, server_key):
     """Call /evaluateStrategy and return the encrypted result hex (or None on error)."""
+    # TWAP / RANGE_GRID are multi-leg: they MUST be evaluated per-leg (get_encrypted_leg_result),
+    # never as a single strategy. A leg-less one here means a malformed submission — skip it so a
+    # degenerate TWAP_SLICE/grid eval can't be sent to the engine.
+    if strategy.get('strategy_type') in ('TWAP', 'RANGE_GRID'):
+        print(f"   -> [FHE Client] ⚠️ {strategy.get('strategy_type')} '{strategy['id']}' has no legs — skipping (multi-leg only)")
+        return None
     print(f"   -> [FHE Client] Evaluating strategy '{strategy['id']}' on the FHE engine...")
     try:
         strategy_type = ENGINE_STRATEGY_TYPE.get(
