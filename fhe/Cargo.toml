@@ -6,11 +6,16 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }
+# NOTE: the platform feature must match the build target.
+#   aarch64-unix → Apple Silicon / ARM64 (local dev). REQUIRED here: the x86 seeder_unix path
+#     trips concrete-fft's measure_fastest FFT auto-tuning on ARM, panicking on the first
+#     bootstrap ("cannot convert float seconds to Duration: value is negative").
+#   x86_64-unix  → amd64 (CI / EC2 prod). Swap the platform feature when building there.
 tfhe = { version = "0.5", features = [
     "boolean",
     "shortint",
     "integer",
-    "seeder_unix",
+    "aarch64-unix",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
