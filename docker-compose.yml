@@ -105,6 +105,7 @@ services:
       - "5001:5001"
     environment:
       - RUST_LOG=info
+      - RUST_BACKTRACE=full
     restart: unless-stopped
 
   # Encryption happens in the browser (siphon-app/fhe-wasm): the client generates FHE keys,
