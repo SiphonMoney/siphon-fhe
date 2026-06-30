@@ -78,10 +78,13 @@ def get_encrypted_leg_result(leg, current_price, server_key, now_ts=None):
                 print(f"   <- [FHE Client] ❌ grid leg missing/unknown side '{side}'")
                 return None
 
+        # The engine's EvaluationPayload requires both bounds as String (not nullable). A leg only
+        # sets the bound it uses (TWAP/buy-rung → lower, sell-rung → upper), so send "" for the
+        # unused one — the chosen arm only deserializes the bound it needs.
         payload = {
             "strategy_type": engine_type,
-            "encrypted_upper_bound": leg.get("encrypted_upper_bound"),
-            "encrypted_lower_bound": leg.get("encrypted_lower_bound"),
+            "encrypted_upper_bound": leg.get("encrypted_upper_bound") or "",
+            "encrypted_lower_bound": leg.get("encrypted_lower_bound") or "",
             "server_key": server_key,
             "current_price_cents": int(current_price * 100),
             "current_time": int(now_ts if now_ts is not None else time.time()),
