@@ -66,6 +66,28 @@ def mark_commitment_spent(tag, row_id):
     return jsonify({"status": "ok"}), 200
 
 
+@commitments_bp.route('/commitments/prune', methods=['POST'])
+@verify_tag_sig
+def prune_commitments(tag):
+    """Delete long-spent commitments to reclaim space. Removes only spent='true' rows older than
+    `older_than_days` (default 7) for this tag — never 'false' (spendable) or 'pending' (reserved).
+    Safe: spent rows are filtered out of every spend path, and the on-chain nullifier set remains
+    the source of truth, so a withdrawn note's secret is never needed again."""
+    from datetime import datetime, timedelta
+    data = request.json or {}
+    try:
+        days = max(0, int(data.get('older_than_days', 7)))
+    except (TypeError, ValueError):
+        days = 7
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    session = NoteSession()
+    deleted = (session.query(Commitment)
+               .filter(Commitment.tag == tag, Commitment.spent == 'true', Commitment.updated_at < cutoff)
+               .delete(synchronize_session=False))
+    session.commit()
+    return jsonify({"deleted": int(deleted)}), 200
+
+
 @commitments_bp.route('/commitments/export', methods=['GET'])
 @verify_tag_sig
 def export_commitments(tag):
