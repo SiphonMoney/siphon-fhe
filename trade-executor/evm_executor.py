@@ -342,8 +342,14 @@ def zk_withdraw_from_vault(
     print(f"         pB: {pB}")
     print(f"         pC: {pC}")
 
-    # All nullifier hashes as a list (contract takes uint256[])
-    nullifier_hashes_list = [int(nullifier_hash)]
+    # All nullifier hashes as a list (contract takes uint256[]). Multi-note proofs (N>1) bind N
+    # nullifiers as public inputs — send ALL of them, not just the first, or the public inputs the
+    # contract feeds the verifier won't match the proof and it reverts InvalidZKProof.
+    _all_nh = zk_proof.get("nullifierHashes")
+    if _all_nh and isinstance(_all_nh, list) and len(_all_nh) > 0:
+        nullifier_hashes_list = [int(h) for h in _all_nh]
+    else:
+        nullifier_hashes_list = [int(nullifier_hash)]
 
     # Dry-run via raw JSON-RPC eth_call (web3.py misreads void-returning functions)
     import requests as _req
