@@ -322,6 +322,29 @@ def create_strategy():
                     status='PENDING',
                 ))
 
+        # Part A arming fee: the split already minted slice[0] as a protocol-owned vault note using
+        # this precommitment, so the fee is collected + shielded at creation (no sweep needed). Mark
+        # the precommitment used + record an 'arming' accrual (already in the vault → swept=True).
+        arming_pre = data.get('arming_precommitment')
+        arming_wei = data.get('arming_fee_wei')
+        if arming_pre and arming_wei:
+            try:
+                from database import ProtocolFeeNote, FeeAccrual
+                from datetime import datetime
+                note = ProtocolFeeNote.query.filter_by(precommitment=str(arming_pre)).first()
+                if note and note.status != 'used':
+                    note.status = 'used'
+                    note.amount_wei = str(arming_wei)
+                    note.used_at = datetime.utcnow()
+                db.session.add(FeeAccrual(
+                    chain_id=int(data.get('from_chain') or 11155111),
+                    asset=(data.get('asset_in') or 'ETH').upper(),
+                    amount_wei=str(arming_wei), kind='arming',
+                    strategy_id=new_strategy.id, swept=True,
+                ))
+            except Exception as _e:
+                print(f"[Fee] arming-fee record failed: {_e}")
+
         db.session.commit()
         return jsonify({
             "status": "success",
@@ -408,6 +431,34 @@ def admin_fee_pool():
     db.session.commit()
     avail = ProtocolFeeNote.query.filter_by(chain_id=int(chain_id), asset=asset, status='available').count()
     return jsonify({"status": "success", "added": added, "available": avail}), 200
+
+
+@app.route('/fee-pool/next', methods=['GET'])
+@rate_limit(max_requests=30, window_seconds=60)
+def fee_pool_next():
+    """Serve one available protocol fee-note precommitment for an arming-fee slice and mark it
+    'reserved'. The precommitment is a public hash (the protocol holds the secret). Reserved-but-
+    unused entries are reclaimed by a periodic cleanup (a strategy that never lands its split)."""
+    from database import ProtocolFeeNote
+    from datetime import datetime, timedelta
+    chain_id = int(request.args.get('chain_id', 11155111))
+    asset = (request.args.get('asset') or 'ETH').upper()
+    # Reclaim stale reservations (>10 min) before serving.
+    try:
+        stale = datetime.utcnow() - timedelta(minutes=10)
+        ProtocolFeeNote.query.filter(
+            ProtocolFeeNote.status == 'reserved', ProtocolFeeNote.used_at.is_(None),
+            ProtocolFeeNote.created_at < stale,
+        ).update({"status": "available"})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    note = ProtocolFeeNote.query.filter_by(chain_id=chain_id, asset=asset, status='available').first()
+    if not note:
+        return jsonify({"error": "fee pool empty", "precommitment": None}), 200
+    note.status = 'reserved'
+    db.session.commit()
+    return jsonify({"precommitment": note.precommitment}), 200
 
 
 @app.route('/admin/sweep-fees', methods=['POST'])
