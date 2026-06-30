@@ -119,6 +119,7 @@ if DATABASE_URI and 'sqlite' in DATABASE_URI:
                     ("executed_count", "INTEGER DEFAULT 0"),
                     ("eval_mode", "VARCHAR(10)"),
                     ("schedule_anchor", "INTEGER"),
+                    ("execution_window_sec", "INTEGER"),
                 ]:
                     try:
                         conn.execute(text(f"ALTER TABLE strategy ADD COLUMN {col} {typedef}"))
@@ -291,6 +292,7 @@ def create_strategy():
             executed_count=0,
             eval_mode=eval_mode,
             schedule_anchor=data.get('schedule_anchor'),
+            execution_window_sec=data.get('execution_window_sec'),
         )
 
         db.session.add(new_strategy)

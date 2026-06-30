@@ -19,6 +19,34 @@ def _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price):
     return sol_price
 
 
+def _expire_strategy(sid):
+    """Window elapsed → stop firing. Mark the strategy + remaining legs EXPIRED. Unspent slice/
+    deposit notes stay the user's spendable notes (the browser reverts the 'pending' reservation
+    to 'false' on EXPIRED, so the leftover funds are returned)."""
+    try:
+        strat = Strategy.query.get(sid)
+        if strat and strat.status not in ('EXECUTED', 'FAILED', 'EXPIRED'):
+            strat.status = 'EXPIRED'
+        StrategyLeg.query.filter(
+            StrategyLeg.strategy_id == sid,
+            StrategyLeg.status.in_(['PENDING', 'ARMED', 'EXECUTING']),
+        ).update({"status": "EXPIRED"}, synchronize_session=False)
+        db.session.commit()
+        print(f"[Scheduler] ⏲ Strategy {sid} EXPIRED (execution window elapsed)")
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Scheduler] expire failed for {sid}: {e}")
+
+
+def _is_expired(strategy_dict):
+    w = strategy_dict.get('execution_window_sec')
+    a = strategy_dict.get('schedule_anchor')
+    try:
+        return bool(w and a and (int(time.time()) - int(a)) > int(w))
+    except (TypeError, ValueError):
+        return False
+
+
 def _process_multi_leg(strategy_dict, current_price, server_key, user_id):
     """Evaluate + (in TEE mode) fire each eligible leg of a TWAP/Grid strategy independently.
 
@@ -134,6 +162,11 @@ def worker_loop(app):
                             server_keys[user_id] = server_key
                         if not server_key:
                             print(f"[Scheduler] ⚠️ No server key for user {user_id}; skipping {sid}")
+                            continue
+
+                        # Expiry: execution window elapsed → stop firing, return unspent funds.
+                        if _is_expired(strategy_dict):
+                            _expire_strategy(sid)
                             continue
 
                         current_price = _price_for(strategy_dict, live_prices, eth_feed_id, eth_price, sol_price)

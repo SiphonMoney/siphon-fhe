@@ -129,6 +129,7 @@ class Strategy(db.Model):
     # reconstruct/verify schedule offsets. Plaintext is fine: it's just "when the order started",
     # the same instant the creation tx is already publicly timestamped on-chain.
     schedule_anchor  = db.Column(db.Integer, nullable=True)
+    execution_window_sec = db.Column(db.Integer, nullable=True)  # expire + return funds after this
 
     # Timestamps
     created_at = db.Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -168,6 +169,7 @@ class Strategy(db.Model):
             'executed_count': self.executed_count,
             'eval_mode': self.eval_mode,
             'schedule_anchor': self.schedule_anchor,
+            'execution_window_sec': self.execution_window_sec,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
