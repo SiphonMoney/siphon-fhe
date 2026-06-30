@@ -44,7 +44,11 @@ services:
     ports:
       - "5005:5005"
     environment:
-      - FHE_ENGINE_URL=http://fhe-engine:5001/evaluateStrategy
+      # Default: the Docker engine. LOCAL ARM (Apple Silicon) override: the containerised aarch64
+      # engine computes WRONG FHE results (FFT auto-tuning under the coarse container clock), so
+      # point at a host-native engine via:
+      #   FHE_ENGINE_URL=http://host.docker.internal:5001/evaluateStrategy
+      - FHE_ENGINE_URL=${FHE_ENGINE_URL:-http://fhe-engine:5001/evaluateStrategy}
       - PYTH_HERMES_URL=https://hermes.pyth.network
       - DATABASE_URI=postgresql://siphon:siphon_secure_pass@postgres:5432/siphon_strategies
       - HELIUS_API_KEY=${HELIUS_API_KEY}
