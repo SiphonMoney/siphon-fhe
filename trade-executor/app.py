@@ -39,6 +39,8 @@ CORS(
             "X-Signature",
             "X-Timestamp",
             "X-API-TOKEN",
+            "X-ADMIN-TOKEN",
+            "X-Client-ID",
             "Authorization",
         ],
         "methods": ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
