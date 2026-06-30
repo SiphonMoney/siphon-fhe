@@ -1,12 +1,24 @@
+import os
 import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from wallet_auth import verify_wallet_sig
 from prover import generate_proof
 from config import PORT, VALID_CIRCUITS
 
 app = Flask(__name__)
 CORS(app)
+
+_API_TOKEN = os.getenv('API_TOKEN', '')
+
+
+def _check_token() -> bool:
+    if not _API_TOKEN:
+        return False
+    token = (
+        request.headers.get('X-API-TOKEN') or
+        request.headers.get('Authorization', '').removeprefix('Bearer ')
+    ).strip()
+    return token == _API_TOKEN
 
 
 @app.route('/health', methods=['GET'])
@@ -15,8 +27,10 @@ def health():
 
 
 @app.route('/prove', methods=['POST'])
-@verify_wallet_sig
-def prove(wallet):
+def prove():
+    if not _check_token():
+        return jsonify({'error': 'Unauthorized'}), 401
+
     data    = request.json or {}
     inputs  = data.get('inputs')
     circuit = data.get('circuit', '').lower()
@@ -35,7 +49,7 @@ def prove(wallet):
         return jsonify({'error': str(e)}), 500
 
     elapsed_ms = (time.monotonic() - t0) * 1000
-    print(f"[Benchmark] circuit={circuit} proof={elapsed_ms:.1f}ms wallet={wallet[:10]}...")
+    print(f"[Benchmark] circuit={circuit} proof={elapsed_ms:.1f}ms")
     return jsonify({**result, 'elapsed_ms': elapsed_ms}), 200
 
 
