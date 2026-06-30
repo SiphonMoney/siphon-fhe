@@ -16,13 +16,19 @@ def decryptor_enabled() -> bool:
     return bool(DECRYPTOR_URL)
 
 
+# EVM addresses are case-insensitive; normalise the decryptor key (in-memory HashMap, case
+# sensitive) so an uploaded key always matches the decrypt lookup regardless of checksum casing.
+def _norm_user(user_id: str) -> str:
+    return (user_id or "").strip().lower()
+
+
 def upload_client_key(user_id: str, client_key_hex: str) -> dict:
     """Forward a (dev: plaintext hex) ClientKey to the decryptor. Used by the browser proxy."""
     if not DECRYPTOR_URL:
         return {"ok": False, "error": "DECRYPTOR_URL not configured"}
     r = requests.post(
         f"{DECRYPTOR_URL}/clientKey",
-        json={"user_id": user_id, "client_key": client_key_hex},
+        json={"user_id": _norm_user(user_id), "client_key": client_key_hex},
         timeout=DECRYPTOR_TIMEOUT,
     )
     try:
@@ -39,7 +45,7 @@ def has_client_key(user_id: str) -> bool:
         return False
     try:
         r = requests.get(
-            f"{DECRYPTOR_URL}/hasClientKey/{user_id}",
+            f"{DECRYPTOR_URL}/hasClientKey/{_norm_user(user_id)}",
             timeout=10,
         )
         if r.ok:
@@ -56,7 +62,7 @@ def decrypt_trigger(user_id: str, encrypted_result_hex: str) -> Tuple[Optional[b
     try:
         r = requests.post(
             f"{DECRYPTOR_URL}/decrypt",
-            json={"user_id": user_id, "encrypted_result": encrypted_result_hex},
+            json={"user_id": _norm_user(user_id), "encrypted_result": encrypted_result_hex},
             timeout=DECRYPTOR_TIMEOUT,
         )
         body = r.json()
