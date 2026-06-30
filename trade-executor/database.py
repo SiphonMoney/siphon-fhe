@@ -207,6 +207,10 @@ class StrategyLeg(db.Model):
     zkp_data       = db.Column(CompressedText, nullable=True)
     nullifier_hash = db.Column(db.String(80), nullable=True, index=True)  # first nullifier (claim/dedup)
 
+    # Vault-output (output_mode='vault'): precommitment of THIS leg's asset_out note. After the
+    # leg's swap, the executor re-deposits the output as Poseidon(actualOut, precommitment).
+    output_precommitment = db.Column(db.String, nullable=True)
+
     status      = db.Column(db.String, default='PENDING', nullable=False, index=True)
     tx_hash     = db.Column(db.String, nullable=True)
     executed_at = db.Column(DateTime, nullable=True)
@@ -229,6 +233,7 @@ class StrategyLeg(db.Model):
             'result_updated_at': self.result_updated_at.isoformat() if self.result_updated_at else None,
             'zkp_data': json.loads(self.zkp_data) if self.zkp_data and isinstance(self.zkp_data, str) else self.zkp_data,
             'nullifier_hash': self.nullifier_hash,
+            'output_precommitment': self.output_precommitment,
             'status': self.status,
             'tx_hash': self.tx_hash,
             'executed_at': self.executed_at.isoformat() if self.executed_at else None,

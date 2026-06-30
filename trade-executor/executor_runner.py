@@ -267,20 +267,23 @@ def run_leg_execution(leg_dict, strategy_dict, current_price):
         if nullifier_hash:
             _mark_nullifier_spent(nullifier_hash)
 
-    # Synthesize a single-trade strategy dict from parent + this leg: leg supplies amount + proof;
-    # parent supplies assets and chain. The leg's zkp_data is a 9-signal SWAP proof (one slice
-    # note), so it executes as an atomic Entrypoint.swap — the vault swaps from its own funds to
-    # the proof-bound recipient. N legs ⇒ N swaps ⇒ N distinct nullifiers.
+    # Synthesize a single-trade strategy dict from parent + this leg, then run the SAME proven
+    # single-strategy flow (execute_evm_trade): the leg's zkp_data is a single-slice WITHDRAW proof,
+    # so the executor withdraws that slice → swaps asset_in→asset_out → re-deposits the output into
+    # the asset_out vault as a private note (output_mode='vault', per-leg output_precommitment).
+    # N legs ⇒ N withdraw+swap+deposit chains with N distinct nullifiers; one note is never spent twice.
     leg_strategy = dict(strategy_dict)
     leg_strategy.update({
         'amount':   leg_dict['amount'],
         'zkp_data': leg_dict.get('zkp_data'),
+        'output_mode': (strategy_dict.get('output_mode') or 'vault'),
+        'output_precommitment': leg_dict.get('output_precommitment'),
         'is_private': True,
     })
 
     t_exec = time.monotonic()
     try:
-        tx_hash = execute_evm_leg_swap(
+        tx_hash = execute_evm_trade(
             leg_strategy, current_price, on_withdraw_confirmed=_on_withdraw_confirmed
         )
     except NullifierSpentSwapFailed as swap_fatal:
